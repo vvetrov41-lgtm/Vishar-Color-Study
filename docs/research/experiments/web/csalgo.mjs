@@ -35,14 +35,15 @@ export function downscale(img, maxSide) {
   const s = Math.min(1, maxSide / Math.max(img.w, img.h));
   if (s === 1) return img;
   const w = Math.max(1, Math.round(img.w * s)), h = Math.max(1, Math.round(img.h * s)), out = new Uint8Array(w * h * 3);
-  const fx = img.w / w, fy = img.h / h;
-  for (let y = 0; y < h; y++) {   // box filter (area average) — no aliasing on large downscale
-    const y0 = Math.floor(y * fy), y1 = Math.max(y0 + 1, Math.floor((y + 1) * fy));
+  // area average: every source pixel contributes by its fractional overlap with the output pixel
+  const spans = (n, m) => { const f = n / m, res = []; for (let o = 0; o < m; o++) { const a = o * f, b = (o + 1) * f, l = []; for (let i = Math.floor(a); i < Math.min(n, Math.ceil(b)); i++) { const wt = Math.min(b, i + 1) - Math.max(a, i); if (wt > 0) l.push(i, wt); } res.push(l); } return res; };
+  const sx = spans(img.w, w), sy = spans(img.h, h);
+  for (let y = 0; y < h; y++) {
+    const ly = sy[y];
     for (let x = 0; x < w; x++) {
-      const x0 = Math.floor(x * fx), x1 = Math.max(x0 + 1, Math.floor((x + 1) * fx));
-      let r = 0, g = 0, b = 0, c = 0;
-      for (let yy = y0; yy < y1; yy++) for (let xx = x0, j = (yy * img.w + x0) * 3; xx < x1; xx++, j += 3) { r += img.rgb[j]; g += img.rgb[j + 1]; b += img.rgb[j + 2]; c++; }
-      const o = (y * w + x) * 3; out[o] = r / c; out[o + 1] = g / c; out[o + 2] = b / c;
+      const lx = sx[x]; let r = 0, g = 0, b = 0, c = 0;
+      for (let a = 0; a < ly.length; a += 2) for (let k = 0; k < lx.length; k += 2) { const wt = ly[a + 1] * lx[k + 1], j = (ly[a] * img.w + lx[k]) * 3; r += img.rgb[j] * wt; g += img.rgb[j + 1] * wt; b += img.rgb[j + 2] * wt; c += wt; }
+      const o = (y * w + x) * 3; out[o] = Math.round(r / c); out[o + 1] = Math.round(g / c); out[o + 2] = Math.round(b / c);
     }
   }
   return { w, h, rgb: out };
@@ -131,12 +132,18 @@ export function mergeSmall(labels, w, h, minArea, passes = 3) {
       for (const q of [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, y > 0 ? p - w : -1, y < h - 1 ? p + w : -1]) {
         if (q < 0 || comp[q] === c) continue;
         let m = votes.get(c); if (!m) votes.set(c, (m = new Map()));
-        m.set(lab[q], (m.get(lab[q]) || 0) + 1);
+        m.set(comp[q], (m.get(comp[q]) || 0) + 1);
       }
     }
-    const target = new Map();
-    for (const [c, m] of votes) { let best = -1, bv = -1; for (const [l, v] of m) if (v > bv) { bv = v; best = l; } target.set(c, best); }
-    for (let p = 0; p < w * h; p++) { const t = target.get(comp[p]); if (t !== undefined && t !== lab[p]) { lab[p] = t; changed++; } }
+    // smallest first, union by component: two small neighbours merge instead of swapping labels
+    const parent = Int32Array.from({ length: count }, (_, i) => i), compLab = new Int32Array(count);
+    const find = c => { while (parent[c] !== c) c = parent[c] = parent[parent[c]]; return c; };
+    for (let p = w * h - 1; p >= 0; p--) compLab[comp[p]] = lab[p];
+    for (const c of [...votes.keys()].sort((a, b) => sizes[a] - sizes[b])) {
+      let best = -1, bv = -1; for (const [n, v] of votes.get(c)) if (v > bv) { bv = v; best = n; }
+      const rc = find(c), rn = find(best); if (rc !== rn) parent[rc] = rn;
+    }
+    for (let p = 0; p < w * h; p++) { const t = compLab[find(comp[p])]; if (t !== lab[p]) { lab[p] = t; changed++; } }
     void count; if (!changed) break;
   }
   return lab;
@@ -275,7 +282,7 @@ export function iou(a, b) { let i = 0, u = 0; for (let p = 0; p < a.length; p++)
 // Minimum ΔL* across every boundary between adjacent value regions (low = muddy, merges with time).
 export function boundaryContrast(levelMeansArr, labels, w, h) {
   const k = levelMeansArr.length, seen = new Float64Array(k * k);
-  for (let y = 0; y < h - 1; y++) for (let x = 0; x < w - 1; x++) { const p = y * w + x; for (const q of [p + 1, p + w]) if (labels[p] !== labels[q]) seen[labels[p] * k + labels[q]]++; }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const p = y * w + x; for (const q of [x < w - 1 ? p + 1 : -1, y < h - 1 ? p + w : -1]) if (q >= 0 && labels[p] !== labels[q]) seen[labels[p] * k + labels[q]]++; }
   const pairs = []; for (let a = 0; a < k; a++) for (let b = a + 1; b < k; b++) { const c = seen[a * k + b] + seen[b * k + a]; if (c) pairs.push({ a, b, dL: Math.abs(levelMeansArr[a] - levelMeansArr[b]), border: c }); }
   return pairs.sort((x, y) => x.dL - y.dL);
 }

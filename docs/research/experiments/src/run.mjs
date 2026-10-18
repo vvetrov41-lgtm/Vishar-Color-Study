@@ -22,8 +22,8 @@ for (const name of ['stilllife', 'landscape', 'flash', 'portrait']) {
   t('12mp_quantize5', () => A.quantize(lab12.L, A.evenBins(5)), T);
   t('12mp_boxblur_strong_L', () => A.smooth(lab12.L, big.w, big.h, 2), T);
   t('12mp_temperature', () => A.temperature(lab12), T);
-  t('12mp_kmeansLab_k12_sample40k', () => A.kmeansLab(lab12, 12), T);
-  t('12mp_assign_k12_fullres', () => A.assign(lab12, A.kmeansLab(lab12, 12)), T);
+  const cent12 = t('12mp_kmeansLab_k12_sample40k', () => A.kmeansLab(lab12, 12), T);
+  t('12mp_assign_k12_fullres', () => A.assign(lab12, cent12), T);
   const work = t('12mp_downscale_to_1600', () => A.downscale(big, 1600), T);
   R.bytes = { rgb_12mp: n12 * 3, rgba_12mp: n12 * 4, lab_float32_12mp: n12 * 12 };
   void work;
