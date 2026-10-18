@@ -59,7 +59,6 @@ export interface RunConfig {
 interface Step {
   id: string;
   label: string;
-  heavy?: boolean;
   run: () => Promise<void>;
 }
 
@@ -113,10 +112,11 @@ export class Runner {
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
       this.cb.onProgress(s.label, i, steps.length);
-      if (s.heavy && crashed.has(s.id) && !cfg.forceCrashed) {
+      // Any step that took the tab down before is skipped, so the run can still finish.
+      if (crashed.has(s.id) && !cfg.forceCrashed) {
         this.add({
           id: s.id,
-          group: 'perf',
+          group: s.id.split('.')[0],
           name: s.label,
           status: 'skip',
           note: 'пропущено: прошлый прогон оборвался на этом шаге (включи «Повторить шаги, на которых был сбой», чтобы проверить снова)',
@@ -154,8 +154,8 @@ export class Runner {
     ];
     if (cfg.include48) {
       steps.push(
-        { id: 'perf.jpg48', label: '48 МП JPEG', heavy: true, run: () => this.perf('perf.jpg48', '48 МП JPEG', SAMPLES.jpg48) },
-        { id: 'perf.heic48', label: '48 МП HEIC', heavy: true, run: () => this.perf('perf.heic48', '48 МП HEIC', SAMPLES.heic48) },
+        { id: 'perf.jpg48', label: '48 МП JPEG', run: () => this.perf('perf.jpg48', '48 МП JPEG', SAMPLES.jpg48) },
+        { id: 'perf.heic48', label: '48 МП HEIC', run: () => this.perf('perf.heic48', '48 МП HEIC', SAMPLES.heic48) },
       );
     }
     return steps;
@@ -614,12 +614,16 @@ export class Runner {
       this.add({ id, group: 'perf', name: label, status: 'skip', note: errMsg(e) });
       return;
     }
-    const r = await this.pipeline(id, label, blob, opts);
-    if (r) r.steps.fetchMs = fetchMs;
-    if (r) r.steps.fetchSource = fromCache;
+    await this.pipeline(id, label, blob, opts, { fetchMs, fetchSource: fromCache });
   }
 
-  async pipeline(id: string, label: string, blob: Blob, opts: PipelineOptions): Promise<PipelineResult | null> {
+  async pipeline(
+    id: string,
+    label: string,
+    blob: Blob,
+    opts: PipelineOptions,
+    extra: Record<string, number | string> = {},
+  ): Promise<PipelineResult | null> {
     const stopJank = jankMonitor();
     const t0 = performance.now();
     let r: PipelineResult;
@@ -630,6 +634,7 @@ export class Runner {
       this.add({ id, group: 'perf', name: label, status: 'fail', note: errMsg(e) });
       return null;
     }
+    Object.assign(r.steps, extra);
     r.steps.totalMs = round(performance.now() - t0);
     r.steps.mainThreadMaxStallMs = stopJank();
     const s = r.steps;

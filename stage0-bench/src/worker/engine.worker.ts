@@ -107,14 +107,16 @@ async function caps() {
     const fh = await root.getFileHandle('bench-sync.bin', { create: true });
     const h = await (fh as any).createSyncAccessHandle();
     const buf = new Uint8Array(4 * 1024 * 1024);
-    for (let i = 0; i < buf.length; i += 4096) buf[i] = i & 255;
+    for (let i = 0; i < buf.length; i++) buf[i] = ((i >> 12) + (i & 7) + 1) & 255 || 1;
     h.write(buf, { at: 0 });
     h.flush();
     const back = new Uint8Array(buf.length);
     h.read(back, { at: 0 });
     h.close();
     await root.removeEntry('bench-sync.bin');
-    r.opfsSync = back[4096] === buf[4096] && back[8192] === buf[8192];
+    let same = true;
+    for (let i = 0; i < buf.length; i += 997) if (back[i] !== buf[i]) { same = false; break; }
+    r.opfsSync = same && back[buf.length - 1] === buf[buf.length - 1];
     r.opfsSyncMs4MB = round(now() - t0);
   } catch (e) {
     r.opfsSync = false;
