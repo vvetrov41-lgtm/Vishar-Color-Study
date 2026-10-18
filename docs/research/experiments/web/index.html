@@ -1,0 +1,23 @@
+<!doctype html><meta charset="utf-8"><title>Vishar CS bench</title>
+<body><h1>Vishar Color Study — capability bench</h1><pre id="o">running…</pre>
+<script type="module">
+const o = document.getElementById('o'), log = (...a) => { console.log('[bench]', ...a); o.textContent += '\n' + a.join(' '); };
+const caps = {
+  worker_module: (() => { try { new Worker('data:text/javascript,', { type: 'module' }); return true; } catch { return false; } })(),
+  offscreen2d: typeof OffscreenCanvas !== 'undefined' && !!new OffscreenCanvas(1, 1).getContext('2d'),
+  offscreen_webgl2: typeof OffscreenCanvas !== 'undefined' && !!new OffscreenCanvas(1, 1).getContext('webgl2'),
+  webgpu: 'gpu' in navigator,
+  wasm_simd: WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11])),
+  shared_array_buffer: typeof SharedArrayBuffer !== 'undefined', cross_origin_isolated: self.crossOriginIsolated,
+  opfs: !!navigator.storage?.getDirectory, storage_persist: !!navigator.storage?.persist, hw_concurrency: navigator.hardwareConcurrency,
+  device_memory: navigator.deviceMemory ?? null,
+};
+const gl = document.createElement('canvas').getContext('webgl2'); if (gl) { caps.webgl2_max_texture = gl.getParameter(gl.MAX_TEXTURE_SIZE); caps.webgl2_float_rt = !!gl.getExtension('EXT_color_buffer_float'); }
+log('CAPS', JSON.stringify(caps));
+for (const [url, maxSide] of [['stilllife_1k.png', 1024], ['stilllife_12mp.png', 1600], ['stilllife_12mp.png', 4032]]) {
+  const w = new Worker('worker.mjs', { type: 'module' });
+  const r = await new Promise(res => { w.onmessage = e => res(e.data); w.postMessage({ url, maxSide }); });
+  w.terminate(); log('RUN', url, maxSide, JSON.stringify(r));
+}
+log('DONE');
+</script>

@@ -1,0 +1,56 @@
+==== stilllife_1k unique out colors 501
+   out [255  87  40] 25.9%  src mean [150 111  78]
+   out [173 158 183] 7.1%  src mean [93 94 99]
+   out [163 154 187] 6.5%  src mean [ 90  93 102]
+   out [159 153 189] 5.9%  src mean [ 89  91 103]
+   out [255  40   0] 5.2%  src mean [194  99  36]
+   out [176 159 182] 5.1%  src mean [95 94 99]
+   out [167 156 186] 4.7%  src mean [ 90  93 100]
+   out [255 127  75] 3.8%  src mean [82 61 42]
+   corr(out b*, R-B) = 0.893   sign agree 97.1%
+   corr(out b*, b*) = 0.905   sign agree 97.6%
+   corr(out b*, a*+b*) = 0.853   sign agree 97.6%
+   corr(out b*, hue cos(h-50)) = 0.866   sign agree 97.6%
+   out L* vs src L* corr -0.223
+==== landscape_1k unique out colors 402
+   out [255 112  62] 14.6%  src mean [54 84 50]
+   out [255 162 104] 12.9%  src mean [47 83 79]
+   out [177 159 181] 6.5%  src mean [143 155 184]
+   out [255 157 101] 3.7%  src mean [ 96 115 121]
+   out [163 154 187] 1.9%  src mean [ 80 108 132]
+   out [141 147 196] 1.5%  src mean [111 133 174]
+   out [ 66 122 228] 1.2%  src mean [106 150 215]
+   out [ 48 116 235] 1.2%  src mean [ 98 145 217]
+   corr(out b*, R-B) = 0.928   sign agree 93.1%
+   corr(out b*, b*) = 0.927   sign agree 99.0%
+   corr(out b*, a*+b*) = 0.894   sign agree 85.0%
+   corr(out b*, hue cos(h-50)) = 0.910   sign agree 96.3%
+   out L* vs src L* corr -0.254
+==== portrait_1k unique out colors 258
+   out [255 180 120] 65.0%  src mean [34 31 38]
+   out [255 131  78] 9.8%  src mean [59 37 24]
+   out [255  57  15] 3.4%  src mean [227 164 131]
+   out [255 156 100] 1.7%  src mean [33 24 19]
+   out [255  69  25] 0.6%  src mean [206 149 120]
+   out [255  83  37] 0.5%  src mean [179 129 104]
+   out [255  66  22] 0.5%  src mean [213 154 124]
+   out [255  79  33] 0.5%  src mean [185 134 107]
+   corr(out b*, R-B) = 0.837   sign agree 34.9%
+   corr(out b*, b*) = 0.823   sign agree 35.4%
+   corr(out b*, a*+b*) = 0.831   sign agree 35.3%
+   corr(out b*, hue cos(h-50)) = 0.830   sign agree 35.3%
+   out L* vs src L* corr -0.898
+==== flash_1k unique out colors 345
+   out [255 180 120] 54.9%  src mean [237 230 214]
+   out [255  72  27] 10.1%  src mean [177  30  46]
+   out [255  40   0] 5.3%  src mean [221  98  60]
+   out [255 179 119] 2.3%  src mean [236 227 212]
+   out [178 159 181] 1.5%  src mean [234 227 212]
+   out [180 160 180] 1.4%  src mean [236 228 213]
+   out [179 160 181] 1.2%  src mean [235 229 213]
+   out [176 159 182] 1.1%  src mean [231 226 211]
+   corr(out b*, R-B) = 0.627   sign agree 43.4%
+   corr(out b*, b*) = 0.569   sign agree 37.5%
+   corr(out b*, a*+b*) = 0.604   sign agree 44.0%
+   corr(out b*, hue cos(h-50)) = 0.605   sign agree 44.2%
+   out L* vs src L* corr 0.768

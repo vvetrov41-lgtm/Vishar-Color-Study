@@ -1,0 +1,190 @@
+{
+ "stilllife": {
+  "even": {
+   "thresholds": [
+    20,
+    40,
+    60,
+    80
+   ],
+   "mse": 27.34,
+   "used_levels": 5
+  },
+  "kmeans": {
+   "thresholds": [
+    17.1,
+    33.2,
+    45.3,
+    66.8
+   ],
+   "mse": 7.17,
+   "used_levels": 5
+  },
+  "kmeans_sqrt": {
+   "thresholds": [
+    17.3,
+    32.7,
+    46.5,
+    68.4
+   ],
+   "mse": 7.25,
+   "used_levels": 5
+  },
+  "kmeans_flat": {
+   "thresholds": [
+    20.9,
+    40.7,
+    60.6,
+    80.5
+   ],
+   "mse": 22.73,
+   "used_levels": 5
+  },
+  "notan": {
+   "median_threshold": 40,
+   "otsu_threshold": 31.6,
+   "otsu_dark_ratio": 0.173
+  }
+ },
+ "landscape": {
+  "even": {
+   "thresholds": [
+    20,
+    40,
+    60,
+    80
+   ],
+   "mse": 22.53,
+   "used_levels": 4
+  },
+  "kmeans": {
+   "thresholds": [
+    39.9,
+    54.8,
+    66.9,
+    76.5
+   ],
+   "mse": 7.98,
+   "used_levels": 5
+  },
+  "kmeans_sqrt": {
+   "thresholds": [
+    39.9,
+    54.5,
+    66.9,
+    77.5
+   ],
+   "mse": 8.01,
+   "used_levels": 5
+  },
+  "kmeans_flat": {
+   "thresholds": [
+    38.5,
+    53.5,
+    68.5,
+    83.7
+   ],
+   "mse": 8.35,
+   "used_levels": 5
+  },
+  "notan": {
+   "median_threshold": 61.2,
+   "otsu_threshold": 51.6,
+   "otsu_dark_ratio": 0.406
+  }
+ },
+ "flash": {
+  "even": {
+   "thresholds": [
+    20,
+    40,
+    60,
+    80
+   ],
+   "mse": 4.89,
+   "used_levels": 5
+  },
+  "kmeans": {
+   "thresholds": [
+    54.9,
+    83,
+    91.1,
+    93.1
+   ],
+   "mse": 59.92,
+   "used_levels": 5
+  },
+  "kmeans_sqrt": {
+   "thresholds": [
+    21.1,
+    44.1,
+    64.4,
+    83.6
+   ],
+   "mse": 3.73,
+   "used_levels": 5
+  },
+  "kmeans_flat": {
+   "thresholds": [
+    19.8,
+    39.9,
+    60.1,
+    80.2
+   ],
+   "mse": 4.91,
+   "used_levels": 5
+  },
+  "notan": {
+   "median_threshold": 91.4,
+   "otsu_threshold": 63.7,
+   "otsu_dark_ratio": 0.251
+  }
+ },
+ "portrait": {
+  "even": {
+   "thresholds": [
+    20,
+    40,
+    60,
+    80
+   ],
+   "mse": 7.56,
+   "used_levels": 4
+  },
+  "kmeans": {
+   "thresholds": [
+    11.1,
+    16.1,
+    32.1,
+    56.4
+   ],
+   "mse": 7.89,
+   "used_levels": 5
+  },
+  "kmeans_sqrt": {
+   "thresholds": [
+    17,
+    29,
+    44.6,
+    60.3
+   ],
+   "mse": 4.61,
+   "used_levels": 5
+  },
+  "kmeans_flat": {
+   "thresholds": [
+    20.9,
+    35.1,
+    49.3,
+    63.7
+   ],
+   "mse": 5.32,
+   "used_levels": 5
+  },
+  "notan": {
+   "median_threshold": 12.5,
+   "otsu_threshold": 37.1,
+   "otsu_dark_ratio": 0.853
+  }
+ }
+}
