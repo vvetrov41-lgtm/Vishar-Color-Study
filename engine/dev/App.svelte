@@ -183,6 +183,7 @@
     if (!engine) return;
     if (tool === 'pipette') {
       canvas.setPointerCapture(e.pointerId);
+      pressed = true;
       void pipette(e);
       return;
     }
@@ -194,6 +195,8 @@
 
   // Pipette: one request in flight, the latest pointer position wins.
   let picking = false;
+  // A pick can come back after the finger is lifted: it updates the card, not the loupe.
+  let pressed = false;
   let nextPick: PointerEvent | null = null;
   async function pipette(e: PointerEvent) {
     if (!engine || !last) return;
@@ -207,9 +210,8 @@
       if (p) {
         picked = p;
         current = { info: p.info, from: `пипетка ${p.size}×${p.size} в (${p.x}, ${p.y})` };
-        loupeAt = { x: cx, y: cy };
+        if (pressed) loupeAt = { x: cx, y: cy };
         pickMs = [...pickMs.slice(-199), Math.round((performance.now() - t0) * 10) / 10];
-        drawLoupe();
       }
     } finally {
       picking = false;
@@ -224,8 +226,14 @@
   }
 
   function release() {
+    pressed = false;
     loupeAt = null;
   }
+
+  // The loupe canvas mounts after loupeAt is set, so draw once it is bound.
+  $effect(() => {
+    if (lcanvas && picked && loupeAt) drawLoupe();
+  });
 
   function drawLoupe() {
     if (!lcanvas || !picked) return;

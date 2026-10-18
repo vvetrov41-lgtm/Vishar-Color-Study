@@ -32,30 +32,36 @@ class Engine {
   private screen = { cssW: 1, cssH: 1, dpr: 1, bg: [128, 128, 128] as [number, number, number] };
   // Per photo, built on first use: unsmoothed pixels for the pipette and palette, the grid
   // sample, and the ΔE histogram of the current Highlight target.
-  private px: Uint8Array | null = null;
-  private grid: Grid | null = null;
+  // Keyed by smoothing level: the pipette and palette use 0, Highlight the active level.
+  private px = new Map<Smoothing, Uint8Array>();
+  private grid = new Map<Smoothing, Grid>();
   private dHist: { key: string; h: Float64Array } | null = null;
 
   private reset() {
     this.analysis.clear();
     this.plan = null;
-    this.px = null;
-    this.grid = null;
+    this.px.clear();
+    this.grid.clear();
     this.dHist = null;
   }
 
-  private pixels(): Uint8Array {
-    return (this.px ??= this.renderer.readSource(0));
+  private pixels(level: Smoothing = 0): Uint8Array {
+    let px = this.px.get(level);
+    if (!px) this.px.set(level, (px = this.renderer.readSource(level)));
+    return px;
   }
 
-  private sample(): Grid {
+  private sample(level: Smoothing = 0): Grid {
     const r = this.renderer;
-    return (this.grid ??= sampleGrid(this.pixels(), r.w, r.h));
+    let g = this.grid.get(level);
+    if (!g) this.grid.set(level, (g = sampleGrid(this.pixels(level), r.w, r.h)));
+    return g;
   }
 
-  private deltaHist(target: Lab): Float64Array {
-    const key = target.join(',');
-    if (this.dHist?.key !== key) this.dHist = { key, h: deltaHistogram(this.sample(), target) };
+  /** ΔE histogram on the same smoothing level the Highlight mask is rendered from. */
+  private deltaHist(target: Lab, level: Smoothing): Float64Array {
+    const key = `${level}:${target.join(',')}`;
+    if (this.dHist?.key !== key) this.dHist = { key, h: deltaHistogram(this.sample(level), target) };
     return this.dHist.h;
   }
 
@@ -185,7 +191,7 @@ class Engine {
     let histMs = 0;
     if (state.view === 'highlight') {
       const tg = state.highlight.target, th = now();
-      hist = tg ? this.deltaHist(tg) : [];
+      hist = tg ? this.deltaHist(tg, state.smoothing) : [];
       histMs = now() - th;
       stats.highlight = { share: tg ? Math.round(matchedShare(hist, state.highlight.tolerance) * 1e4) / 1e4 : 0 };
     }
