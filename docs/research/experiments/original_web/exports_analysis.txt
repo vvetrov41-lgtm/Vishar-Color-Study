@@ -1,0 +1,36 @@
+===== stilllife_1k cmap vs jpg mean abs diff 0.06
+values: gray True levels 9 [np.int64(18), np.int64(43), np.int64(66), np.int64(94), np.int64(119), np.int64(150), np.int64(182), np.int64(211), np.int64(247)]
+  pct [np.float64(6.2), np.float64(4.0), np.float64(9.2), np.float64(49.7), np.float64(28.1), np.float64(1.0), np.float64(0.8), np.float64(0.4), np.float64(0.5)]
+  L* bounds [(np.float64(12.7), np.float64(12.4)), (np.float64(27.5), np.float64(24.2)), (np.float64(41.1), np.float64(37.0)), (np.float64(47.5), np.float64(47.7)), (np.float64(57.0), np.float64(57.6)), (np.float64(71.1), np.float64(68.9)), (np.float64(82.6), np.float64(78.6)), (np.float64(94.1), np.float64(90.9))]
+  luma bounds [(np.float64(30.2), np.float64(30.9)), (np.float64(54.3), np.float64(54.8)), (np.float64(80.1), np.float64(82.1)), (np.float64(102.1), np.float64(109.2)), (np.float64(130.7), np.float64(134.8)), (np.float64(166.2), np.float64(166.8)), (np.float64(196.1), np.float64(196.7)), (np.float64(229.2), np.float64(230.0))]
+notan uniq [  0. 255.] black% 0.498
+  notan L*: dark max(p99.5) 46.1 light min(p0.5) 40.1 median 40.1 mean 40.1
+  notan luma: dark max(p99.5) 94.3 light min(p0.5) 94.9 median 94.9 mean 94.4
+simplify unique colors 142
+===== landscape_1k cmap vs jpg mean abs diff 0.07
+values: gray True levels 9 [np.int64(68), np.int64(74), np.int64(107), np.int64(137), np.int64(152), np.int64(170), np.int64(184), np.int64(199), np.int64(247)]
+  pct [np.float64(14.0), np.float64(17.8), np.float64(8.8), np.float64(9.6), np.float64(21.4), np.float64(13.9), np.float64(9.1), np.float64(4.4), np.float64(0.8)]
+  L* bounds [(np.float64(32.6), np.float64(32.6)), (np.float64(38.0), np.float64(40.8)), (np.float64(51.1), np.float64(52.6)), (np.float64(61.5), np.float64(60.3)), (np.float64(67.3), np.float64(67.5)), (np.float64(73.0), np.float64(73.0)), (np.float64(77.9), np.float64(78.0)), (np.float64(83.6), np.float64(92.1))]
+  luma bounds [(np.float64(71.2), np.float64(71.8)), (np.float64(84.2), np.float64(93.4)), (np.float64(120.0), np.float64(124.1)), (np.float64(144.3), np.float64(144.8)), (np.float64(161.2), np.float64(161.9)), (np.float64(177.3), np.float64(177.7)), (np.float64(191.2), np.float64(191.7)), (np.float64(207.1), np.float64(230.1))]
+notan uniq [  0. 255.] black% 0.496
+  notan L*: dark max(p99.5) 61.1 light min(p0.5) 60.4 median 61.0 mean 54.7
+  notan luma: dark max(p99.5) 143.3 light min(p0.5) 143.9 median 144.3 mean 129.2
+simplify unique colors 177
+===== flash_1k cmap vs jpg mean abs diff 0.09
+values: gray True levels 9 [np.int64(14), np.int64(48), np.int64(76), np.int64(94), np.int64(112), np.int64(156), np.int64(196), np.int64(230), np.int64(241)]
+  pct [np.float64(4.3), np.float64(1.2), np.float64(15.1), np.float64(0.4), np.float64(5.2), np.float64(0.8), np.float64(2.1), np.float64(68.6), np.float64(2.5)]
+  L* bounds [(np.float64(13.1), np.float64(12.4)), (np.float64(28.8), np.float64(29.1)), (np.float64(40.1), np.float64(36.6)), (np.float64(45.7), np.float64(45.3)), (np.float64(56.7), np.float64(56.4)), (np.float64(73.2), np.float64(72.7)), (np.float64(86.2), np.float64(88.7)), (np.float64(93.1), np.float64(93.3))]
+  luma bounds [(np.float64(30.5), np.float64(31.9)), (np.float64(62.1), np.float64(64.8)), (np.float64(83.7), np.float64(85.8)), (np.float64(103.2), np.float64(104.8)), (np.float64(133.0), np.float64(134.9)), (np.float64(176.2), np.float64(176.9)), (np.float64(213.2), np.float64(221.9)), (np.float64(234.9), np.float64(235.7))]
+notan uniq [  0. 255.] black% 0.345
+  notan L*: dark max(p99.5) 91.2 light min(p0.5) 91.2 median 91.4 mean 76.3
+  notan luma: dark max(p99.5) 229.3 light min(p0.5) 229.7 median 230.3 mean 188.0
+simplify unique colors 164
+===== portrait_1k cmap vs jpg mean abs diff 0.03
+values: gray True levels 9 [np.int64(27), np.int64(35), np.int64(63), np.int64(89), np.int64(112), np.int64(135), np.int64(157), np.int64(178), np.int64(187)]
+  pct [np.float64(2.3), np.float64(79.4), np.float64(2.5), np.float64(2.4), np.float64(2.5), np.float64(2.7), np.float64(2.8), np.float64(5.4), np.float64(0.0)]
+  L* bounds [(np.float64(11.7), np.float64(11.9)), (np.float64(19.7), np.float64(20.4)), (np.float64(32.3), np.float64(32.4)), (np.float64(42.2), np.float64(42.4)), (np.float64(51.4), np.float64(51.6)), (np.float64(60.3), np.float64(60.6)), (np.float64(68.2), np.float64(68.5)), (np.float64(73.3), np.float64(73.6))]
+  luma bounds [(np.float64(31.2), np.float64(31.7)), (np.float64(48.1), np.float64(49.8)), (np.float64(76.4), np.float64(76.8)), (np.float64(100.3), np.float64(100.7)), (np.float64(123.3), np.float64(123.8)), (np.float64(146.2), np.float64(147.2)), (np.float64(167.2), np.float64(168.2)), (np.float64(181.1), np.float64(182.6))]
+notan uniq [  0. 255.] black% 0.3
+  notan L*: dark max(p99.5) 12.6 light min(p0.5) 12.8 median 12.8 mean 20.8
+  notan luma: dark max(p99.5) 33.2 light min(p0.5) 33.7 median 33.7 mean 52.4
+simplify unique colors 112

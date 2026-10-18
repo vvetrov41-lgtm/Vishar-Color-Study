@@ -1,0 +1,31 @@
+{
+  "evidence_id": "ev_f7e8cca5131ae817671da9511eea3521fa5c43910ba43cc43741568620e9ee1c",
+  "operation": "capture_browser_scenario",
+  "confidence": "observed",
+  "provider": {
+    "id": "rea-playwright-browser-scenario",
+    "name": "REA Playwright browser scenario capture provider",
+    "version": "1"
+  },
+  "browser": {
+    "mode": "launch",
+    "process_ownership": "provider-owned",
+    "cleanup": "terminated-owned-process",
+    "product": "Chromium",
+    "version": "141.0.7390.37"
+  },
+  "duration_ms": 26213,
+  "completeness": {
+    "status": "complete",
+    "equality_eligible": true,
+    "missing_sections": [],
+    "truncated_sections": []
+  },
+  "bench_console": [
+    "[bench] CAPS {\"worker_module\":true,\"offscreen2d\":true,\"offscreen_webgl2\":true,\"webgpu\":true,\"wasm_simd\":true,\"shared_array_buffer\":false,\"cross_origin_isolated\":false,\"opfs\":true,\"storage_persist\":true,\"hw_concurrency\":4,\"device_memory\":8,\"webgl2_max_texture\":8192,\"webgl2_float_rt\":true}",
+    "[bench] DONE",
+    "[bench] RUN stilllife_12mp.png 1600 {\"src\":[4032,3024],\"work\":[1600,1200],\"ms\":{\"fetch\":38.5,\"decode\":299.70000000001164,\"resize\":115.20000000001164,\"readPixels\":22.899999999965075,\"lab_values\":156.20000000001164,\"simplify\":1433.0999999999767},\"regions\":12,\"levels\":5}",
+    "[bench] RUN stilllife_12mp.png 4032 {\"src\":[4032,3024],\"work\":[4032,3024],\"ms\":{\"fetch\":12.299999999988358,\"decode\":148.59999999997672,\"resize\":0.30000000004656613,\"readPixels\":358.69999999995343,\"lab_values\":1226,\"simplify\":5148.400000000023},\"regions\":12,\"levels\":5}",
+    "[bench] RUN stilllife_1k.png 1024 {\"src\":[1024,768],\"work\":[1024,768],\"ms\":{\"fetch\":15.900000000023283,\"decode\":15,\"resize\":0.5,\"readPixels\":21.70000000001164,\"lab_values\":71.29999999998836,\"simplify\":430.5},\"regions\":12,\"levels\":5}"
+  ]
+}
