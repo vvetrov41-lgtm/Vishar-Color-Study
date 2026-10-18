@@ -74,7 +74,7 @@ void main() {
 export const FRAG_VIEW = `${COMMON}
 in vec2 vUv;
 uniform sampler2D uSrc;
-uniform int uView;          // 0 original, 1 values, 2 notan, 3 temperature
+uniform int uView;          // 0 original, 1 values, 2 notan, 3 temperature, 4 highlight
 uniform int uScale;         // 0 L*·2.55, 1 luma601
 uniform float uThr[19];
 uniform int uNThr;
@@ -88,6 +88,10 @@ uniform bool uInvert;
 uniform float uNeutral;
 uniform float uSpread;
 uniform int uTempStyle;     // 0 map, 1 shaded, 2 two colours
+uniform vec3 uHlTarget;
+uniform float uHlTol;
+uniform int uHlMode;        // 0 highlight, 1 outline
+uniform vec2 uStep;         // outline neighbour step in uv; also the dash pixel size
 uniform vec4 uRect;         // image rect in output space, top-left origin: x, y, w, h
 uniform bool uFlip;
 uniform vec4 uBg;
@@ -103,6 +107,51 @@ vec3 tempColor(float t) {
   return c / 255.0;
 }
 
+// CIEDE2000, twin of deltaE2000() in src/core/colorinfo.ts.
+float hueDeg(float b, float a) {
+  if (a == 0.0 && b == 0.0) return 0.0;
+  float h = degrees(atan(b, a));
+  return h < 0.0 ? h + 360.0 : h;
+}
+const float P25_7 = 6103515625.0;
+float de2000(vec3 l1, vec3 l2) {
+  float C1 = length(l1.yz), C2 = length(l2.yz), Cm = 0.5 * (C1 + C2), Cm7 = pow(Cm, 7.0);
+  float G = 0.5 * (1.0 - sqrt(Cm7 / (Cm7 + P25_7)));
+  float a1p = (1.0 + G) * l1.y, a2p = (1.0 + G) * l2.y;
+  float C1p = length(vec2(a1p, l1.z)), C2p = length(vec2(a2p, l2.z));
+  float h1p = hueDeg(l1.z, a1p), h2p = hueDeg(l2.z, a2p);
+  float dLp = l2.x - l1.x, dCp = C2p - C1p, dhp = 0.0;
+  bool chroma = C1p * C2p != 0.0;
+  if (chroma) {
+    dhp = h2p - h1p;
+    if (dhp > 180.0) dhp -= 360.0;
+    else if (dhp < -180.0) dhp += 360.0;
+  }
+  float dHp = 2.0 * sqrt(C1p * C2p) * sin(radians(dhp * 0.5));
+  float Lmp = 0.5 * (l1.x + l2.x), Cmp = 0.5 * (C1p + C2p), hmp = h1p + h2p;
+  if (chroma) {
+    if (abs(h1p - h2p) <= 180.0) hmp *= 0.5;
+    else hmp = hmp < 360.0 ? (hmp + 360.0) * 0.5 : (hmp - 360.0) * 0.5;
+  }
+  float T = 1.0 - 0.17 * cos(radians(hmp - 30.0)) + 0.24 * cos(radians(2.0 * hmp))
+    + 0.32 * cos(radians(3.0 * hmp + 6.0)) - 0.2 * cos(radians(4.0 * hmp - 63.0));
+  float q = (hmp - 275.0) / 25.0, dTheta = 30.0 * exp(-q * q);
+  float Cmp7 = pow(Cmp, 7.0), Rc = 2.0 * sqrt(Cmp7 / (Cmp7 + P25_7));
+  float L50 = (Lmp - 50.0) * (Lmp - 50.0);
+  float Sl = 1.0 + 0.015 * L50 / sqrt(20.0 + L50), Sc = 1.0 + 0.045 * Cmp, Sh = 1.0 + 0.015 * Cmp * T;
+  float Rt = -sin(radians(2.0 * dTheta)) * Rc;
+  float x = dLp / Sl, y = dCp / Sc, z = dHp / Sh;
+  return sqrt(max(0.0, x * x + y * y + z * z + Rt * y * z));
+}
+
+// Outside the image counts as matching: no contour along the frame.
+// Called in non-uniform control flow, where implicit derivatives are undefined and a
+// GPU may pick a blurred mip level (Apple GPU did): sample level 0 explicitly.
+bool matchAt(vec2 uv) {
+  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return true;
+  return de2000(srgbToLab(textureLod(uSrc, uv, 0.0).rgb), uHlTarget) <= uHlTol;
+}
+
 void main() {
   vec2 p = vec2(vUv.x, uFlip ? 1.0 - vUv.y : vUv.y);
   vec2 uv = (p - uRect.xy) / uRect.zw;
@@ -112,7 +161,16 @@ void main() {
   if (uView != 0) {
     vec3 lab = srgbToLab(c);
     float tone = uScale == 1 ? luma601(c) : lab.x * 2.55;
-    if (uView == 1) {
+    if (uView == 4) {
+      bool m = de2000(lab, uHlTarget) <= uHlTol;
+      if (uHlMode == 0) {
+        if (!m) o = labToSrgb(vec3(lab.x, 0.0, 0.0)) * FADE_KEEP + FADE_TO * (1.0 - FADE_KEEP);
+      } else if (m && (!matchAt(uv - vec2(uStep.x, 0.0)) || !matchAt(uv + vec2(uStep.x, 0.0))
+          || !matchAt(uv - vec2(0.0, uStep.y)) || !matchAt(uv + vec2(0.0, uStep.y)))) {
+        ivec2 ip = ivec2(floor(uv / uStep));
+        o = vec3(((ip.x + ip.y) / 4) % 2 == 1 ? 0.0 : 1.0);
+      }
+    } else if (uView == 1) {
       int lev = 0;
       for (int i = 0; i < 19; i++) { if (i >= uNThr) break; if (tone > uThr[i]) lev++; }
       o = uShowHue ? labToSrgb(vec3(uLevelL[lev], lab.yz)) : vec3(uLevelGray[lev] / 255.0);

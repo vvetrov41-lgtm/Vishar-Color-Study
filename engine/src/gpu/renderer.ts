@@ -171,7 +171,7 @@ export class Renderer {
     return this.read(this.analysis);
   }
 
-  private setViewUniforms(plan: ViewPlan, rect: ScreenRect, flip: boolean, bg: [number, number, number]) {
+  private setViewUniforms(plan: ViewPlan, rect: ScreenRect, flip: boolean, bg: [number, number, number], step: [number, number]) {
     const gl = this.gl, p = this.viewP;
     gl.useProgram(p.p);
     const thr = new Float32Array(MAX_LEVELS - 1), gray = new Float32Array(MAX_LEVELS), L = new Float32Array(MAX_LEVELS);
@@ -194,6 +194,10 @@ export class Renderer {
     gl.uniform1f(p.u('uNeutral'), plan.neutral);
     gl.uniform1f(p.u('uSpread'), plan.spread);
     gl.uniform1i(p.u('uTempStyle'), plan.tempStyle);
+    gl.uniform3f(p.u('uHlTarget'), plan.hlTarget[0], plan.hlTarget[1], plan.hlTarget[2]);
+    gl.uniform1f(p.u('uHlTol'), plan.hlTol);
+    gl.uniform1i(p.u('uHlMode'), plan.hlMode);
+    gl.uniform2f(p.u('uStep'), step[0], step[1]);
     gl.uniform4f(p.u('uRect'), rect.x, rect.y, rect.w, rect.h);
     gl.uniform1i(p.u('uFlip'), flip ? 1 : 0);
     gl.uniform4f(p.u('uBg'), bg[0] / 255, bg[1] / 255, bg[2] / 255, 1);
@@ -201,8 +205,10 @@ export class Renderer {
 
   /** Draws the view into the canvas back buffer; rect is the image rect in 0..1 canvas units. */
   renderScreen(plan: ViewPlan, level: Smoothing, rect: ScreenRect, bg: [number, number, number]) {
-    const src = this.sourceFor(level);
-    this.setViewUniforms(plan, rect, true, bg);
+    const src = this.sourceFor(level), cw = this.canvas.width, ch = this.canvas.height;
+    // Outline step: one source pixel, but never thinner than one screen pixel.
+    const step: [number, number] = [Math.max(1 / this.w, 1 / (rect.w * cw)), Math.max(1 / this.h, 1 / (rect.h * ch))];
+    this.setViewUniforms(plan, rect, true, bg, step);
     this.draw(this.viewP, src, null, this.canvas.width, this.canvas.height);
   }
 
@@ -210,7 +216,7 @@ export class Renderer {
   renderPixels(plan: ViewPlan, level: Smoothing): Uint8Array {
     const src = this.sourceFor(level);
     this.pixels ??= this.target(this.w, this.h);
-    this.setViewUniforms(plan, { x: 0, y: 0, w: 1, h: 1 }, false, [0, 0, 0]);
+    this.setViewUniforms(plan, { x: 0, y: 0, w: 1, h: 1 }, false, [0, 0, 0], [1 / this.w, 1 / this.h]);
     this.draw(this.viewP, src, this.pixels, this.w, this.h);
     return this.read(this.pixels);
   }
@@ -219,7 +225,7 @@ export class Renderer {
   readSource(level: Smoothing): Uint8Array {
     return this.renderPixels({
       view: 0, scale: 0, thresholds: [], levelGray: [], levelL: [], showHue: false, highlight: -1,
-      notanThresholds: [], invert: false, neutral: 0, spread: 1, tempStyle: 0,
+      notanThresholds: [], invert: false, neutral: 0, spread: 1, tempStyle: 0, hlTarget: [0, 0, 0], hlTol: 0, hlMode: 0,
     }, level);
   }
 

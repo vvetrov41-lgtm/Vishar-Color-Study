@@ -39,6 +39,19 @@ try {
     const r = await page.evaluate((v) => window.__engineDev.set({ view: v }), view);
     console.log(`  ${view}: render ${r.lastFrame.timings.renderMs} ms, round trip ${r.lastFrame.roundTripMs} ms`);
   }
+
+  // Stage 2 on the 48 MP working copy: palette, marker check, Highlight from a swatch.
+  const { palette, markers } = await page.evaluate(() => window.__engineDev.palette());
+  console.log(`palette: ${palette.totalMs} ms (read ${palette.readMs}, grid ${palette.gridMs}, extract ${palette.ms}), dominant ${palette.dominant.map((s) => s.hex).join(' ')}, accents ${palette.accents.length}`);
+  console.log(`  markers: ${markers.n} re-picked, max ΔE ${markers.maxDE}`);
+  if (markers.maxDE > 2 || palette.dominant.length === 0) failed = true;
+  const target = palette.dominant[1]?.lab ?? palette.dominant[0].lab;
+  for (const [tol, mode] of [[10, 'highlight'], [10.5, 'highlight'], [20, 'outline']]) {
+    const r = await page.evaluate(([t, tl, m]) => window.__engineDev.set({ view: 'highlight', highlight: { target: t, tolerance: tl, mode: m } }), [target, tol, mode]);
+    console.log(`  highlight ${mode} ΔE ${tol}: share ${r.lastFrame.stats.highlight.share}, render ${r.lastFrame.timings.renderMs} ms, round trip ${r.lastFrame.roundTripMs} ms`);
+  }
+  const pick = await page.evaluate(() => window.__engineDev.pick(0.5, 0.5, 5));
+  console.log(`  pipette 5×5 at centre: ${pick.info.codes.HEX} «${pick.info.name}», ${pick.ms} ms`);
   await page.screenshot({ path: process.env.SHOT || 'dist/screenshot.png', fullPage: true });
 } finally {
   await browser.close();
