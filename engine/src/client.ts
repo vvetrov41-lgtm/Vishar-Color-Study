@@ -1,0 +1,92 @@
+// Main-thread side of the engine. Owns no pixels: it forwards view states to the
+// Worker and coalesces slider input so the Worker never builds a backlog.
+
+import * as Comlink from 'comlink';
+import type { ViewState } from './core/view';
+import type { Caps, OpenOptions, OpenResult, ParityReport, ViewResult } from './types';
+import type { EngineApi } from './worker/engine.worker';
+
+type Resolver = { ok: (r: ViewResult) => void; fail: (e: unknown) => void };
+
+export class EngineClient {
+  private inflight = false;
+  private pending: { state: ViewState; waiters: Resolver[] } | null = null;
+  private bitmapCtx: ImageBitmapRenderingContext | null = null;
+
+  private constructor(
+    private readonly worker: Worker,
+    private readonly api: Comlink.Remote<EngineApi>,
+    readonly caps: Caps,
+  ) {}
+
+  static async create(canvas: HTMLCanvasElement): Promise<EngineClient> {
+    const worker = new Worker(new URL('./worker/engine.worker.ts', import.meta.url), { type: 'module' });
+    const api = Comlink.wrap<EngineApi>(worker);
+    let caps: Caps;
+    let ctx: ImageBitmapRenderingContext | null = null;
+    if ('transferControlToOffscreen' in canvas) {
+      const off = canvas.transferControlToOffscreen();
+      caps = await api.init(Comlink.transfer(off, [off]));
+    } else {
+      ctx = (canvas as HTMLCanvasElement).getContext('bitmaprenderer');
+      caps = await api.init();
+    }
+    const c = new EngineClient(worker, api, caps);
+    c.bitmapCtx = ctx;
+    return c;
+  }
+
+  open(blob: Blob, opts?: OpenOptions): Promise<OpenResult> {
+    return this.api.open(blob, opts);
+  }
+
+  async resize(cssW: number, cssH: number, dpr: number, bg?: [number, number, number]): Promise<void> {
+    const r = await this.api.resize(cssW, cssH, dpr, bg);
+    if (r?.frame) this.bitmapCtx?.transferFromImageBitmap(r.frame);
+  }
+
+  /** Latest state wins: while a frame renders, newer states replace the queued one. */
+  setView(state: ViewState): Promise<ViewResult> {
+    return new Promise((ok, fail) => {
+      if (this.inflight) {
+        this.pending = { state, waiters: [...(this.pending?.waiters ?? []), { ok, fail }] };
+        return;
+      }
+      void this.run(state, [{ ok, fail }]);
+    });
+  }
+
+  private async run(state: ViewState, waiters: Resolver[]) {
+    this.inflight = true;
+    const t0 = performance.now();
+    try {
+      const r = await this.api.setView(state);
+      r.roundTripMs = Math.round((performance.now() - t0) * 10) / 10;
+      if (r.frame) this.bitmapCtx?.transferFromImageBitmap(r.frame);
+      waiters.forEach((w) => w.ok(r));
+    } catch (e) {
+      waiters.forEach((w) => w.fail(e));
+    } finally {
+      this.inflight = false;
+      const next = this.pending;
+      this.pending = null;
+      if (next) void this.run(next.state, next.waiters);
+    }
+  }
+
+  pick(x: number, y: number): Promise<number> {
+    return this.api.pick(x, y);
+  }
+
+  exportWork(): Promise<Blob> {
+    return this.api.exportWork();
+  }
+
+  selftest(fixtures: Record<string, string>): Promise<ParityReport> {
+    return this.api.selftest(fixtures);
+  }
+
+  terminate() {
+    this.worker.terminate();
+  }
+}
