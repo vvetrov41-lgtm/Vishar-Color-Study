@@ -4,7 +4,7 @@
 import * as Comlink from 'comlink';
 import type { ViewState } from './core/view';
 import type { PaletteParams } from './core/palette';
-import type { Caps, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, ViewResult } from './types';
+import type { Caps, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from './types';
 import type { EngineApi } from './worker/engine.worker';
 
 type Resolver = { ok: (r: ViewResult) => void; fail: (e: unknown) => void };
@@ -86,6 +86,21 @@ export class EngineClient {
   /** Pipette at (u, v), 0..1 of the working copy. */
   pickColor(u: number, v: number, size: number): Promise<PickResult | null> {
     return this.api.pickColor(u, v, size);
+  }
+
+  /** Simplify / Graph progress, 0..1, while a long computation runs in the Worker. */
+  onProgress(cb: (share: number, stage: string) => void): Promise<void> {
+    return this.api.setProgress(Comlink.proxy(cb));
+  }
+
+  /** Current Drawing as SVG (the view must be 'drawing'). */
+  exportSvg(): Promise<SvgExport> {
+    return this.api.exportSvg();
+  }
+
+  /** Current Drawing as a transparent PNG (for Procreate, which has no SVG import). */
+  exportInkPng(): Promise<Blob> {
+    return this.api.exportInkPng();
   }
 
   exportWork(): Promise<Blob> {

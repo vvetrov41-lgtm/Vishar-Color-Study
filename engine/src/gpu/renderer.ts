@@ -50,6 +50,8 @@ export class Renderer {
   private tmp: Target | null = null;
   private analysis: Target | null = null;
   private pixels: Target | null = null;
+  /** Simplify / Drawing result at work size, shown by view 5. */
+  private result: WebGLTexture | null = null;
   w = 0;
   h = 0;
 
@@ -107,6 +109,8 @@ export class Renderer {
     this.smoothed.clear();
     [this.tmp, this.analysis, this.pixels].forEach((t) => this.drop(t));
     this.tmp = this.analysis = this.pixels = null;
+    if (this.result) this.gl.deleteTexture(this.result);
+    this.result = null;
     this.w = this.h = 0;
   }
 
@@ -121,11 +125,38 @@ export class Renderer {
     gl.generateMipmap(gl.TEXTURE_2D);
   }
 
+  /**
+   * Uploads a CPU-computed view at work size. Mipmapped for zoomed-out display, nearest when
+   * magnified so patch edges and lines stay crisp; at 1:1 it samples texel centres exactly.
+   */
+  setResult(rgba: Uint8ClampedArray) {
+    const gl = this.gl;
+    if (rgba.length !== this.w * this.h * 4) throw new Error('result size does not match the working copy');
+    if (!this.result) {
+      this.result = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, this.result);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texStorage2D(gl.TEXTURE_2D, Math.floor(Math.log2(Math.max(this.w, this.h))) + 1, gl.RGBA8, this.w, this.h);
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.result);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.w, this.h, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    gl.generateMipmap(gl.TEXTURE_2D);
+  }
+
   private draw(p: Program, src: WebGLTexture, dst: Target | null, vw: number, vh: number) {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, dst ? dst.fbo : null);
     gl.viewport(0, 0, vw, vh);
     gl.useProgram(p.p);
+    if (p === this.viewP) {
+      // Unit 1 always holds something valid; the source stands in until a result exists.
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.result ?? src);
+      gl.uniform1i(p.u('uRes'), 1);
+    }
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, src);
     gl.uniform1i(p.u('uSrc'), 0);

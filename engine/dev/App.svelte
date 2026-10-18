@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Debug page for stages 1 and 2: not the Color Study interface. It drives the engine,
+  // Debug page for stages 1–3: not the Color Study interface. It drives the engine,
   // shows the numbers behind each view and checks the stage acceptance targets on a device.
   import { onMount } from 'svelte';
   import { EngineClient } from '../src/client';
@@ -7,7 +7,7 @@
   import { colorInfo, compareColors, deltaE2000, hex, type ColorInfo } from '../src/core/colorinfo';
   import { DEFAULT_PALETTE, type Swatch } from '../src/core/palette';
   import { DEFAULT_VIEW, type ViewState } from '../src/core/view';
-  import type { OpenResult, PaletteResult, ParityReport, PickResult, ViewResult } from '../src/types';
+  import type { OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
 
   const VERSION = __ENGINE_VERSION__;
   const SAMPLES: Array<[string, string]> = [
@@ -25,6 +25,9 @@
   const TARGET = { previewMs: 1500, sliderMs: 50, stallMs: 100 };
   // Stage 2 targets: palette ≤ 500 ms, Highlight slider ≤ 50 ms, marker = where the colour is.
   const TARGET2 = { paletteMs: 500, highlightMs: 50, markerDE: 2 };
+  // Stage 3 targets: Clustering ≤ 1 s on the working copy, Graph ≤ 3 s with a progress indicator.
+  const TARGET3 = { clusteringMs: 1000, graphMs: 3000, drawSliderMs: 50 };
+  const TABS = [['original', 'Оригинал'], ['values', 'Values'], ['notan', 'Notan'], ['temperature', 'Temp'], ['highlight', 'Highlight'], ['simplify', 'Simplify'], ['drawing', 'Drawing']] as const;
   const SIZES = [1, 3, 5, 11];
   const KINDS = [['dominant', 'Dominant'], ['range', 'Range'], ['accents', 'Accents']] as const;
   type Kind = (typeof KINDS)[number][0];
@@ -62,6 +65,14 @@
   let pickMs = $state([] as number[]);
   let copiedCode = $state('');
 
+  // Stage 3: Simplify / Drawing timings per mode, progress of long computations, SVG export.
+  let computeLog = $state({} as Record<string, { ms: number; algoMs?: number; work: string; regions?: number; colors?: number }>);
+  let progress = $state(0);
+  let progressEvents = $state(0);
+  let drawSlider = $state({ n: 0, max: 0, samples: [] as number[] });
+  let lastDraw = { base: '', line: -1 };
+  let svgInfo: (Omit<SvgExport, 'svg'> & { bytes: number }) | null = $state(null);
+
   // Main-thread stall monitor: a 16 ms timer that measures its own lateness.
   function jank() {
     let prev = performance.now();
@@ -85,6 +96,7 @@
         void c.resize(r.width, r.height, devicePixelRatio, bgColor());
       });
       ro.observe(box);
+      void c.onProgress((share) => { progress = share < 1 ? share : 0; progressEvents++; });
       // Hooks for scripts/gpu-parity.mjs (headless Chromium).
       Object.assign(window, {
         __engineDev: {
@@ -93,6 +105,7 @@
           set: async (patch: Partial<ViewState>) => { Object.assign(vs, patch); await apply(); return report(); },
           palette: async () => { await runPalette(); return { palette: $state.snapshot(palette), markers: $state.snapshot(markerCheck) }; },
           pick: (u: number, v: number, size: number) => engine?.pickColor(u, v, size),
+          svg: async () => { const s = await engine!.exportSvg(); return { loops: s.loops, points: s.points, ms: s.ms, bytes: s.svg.length, head: s.svg.slice(0, 200) }; },
           report,
         },
       });
@@ -119,6 +132,9 @@
       markerCheck = null;
       picked = null;
       pickMs = [];
+      computeLog = {};
+      drawSlider = { n: 0, max: 0, samples: [] };
+      svgInfo = null;
       drawHist();
     } catch (e) {
       error = String((e as Error)?.message ?? e);
@@ -148,7 +164,25 @@
     if (!engine || !opened) return;
     const r = await engine.setView($state.snapshot(vs));
     last = r;
+    progress = 0;
     // Frames that had to re-run the analysis (new smoothing) are not slider frames.
+    if (vs.view === 'simplify' || vs.view === 'drawing') {
+      if (r.timings.computeMs > 0) {
+        const key = vs.view === 'simplify' ? vs.simplify.mode : vs.drawing.mode;
+        computeLog[key] = { ms: r.timings.computeMs, algoMs: r.stats.simplify?.ms.total, work: `${r.work.width}×${r.work.height}`, regions: r.stats.simplify?.regions, colors: r.stats.simplify?.colors };
+      }
+      // Line slider frames only: same style, Stroke and smoothing, a new Line value.
+      const base = JSON.stringify([vs.smoothing, vs.drawing.mode, vs.drawing.stroke, vs.drawing.invert]);
+      const lineOnly = vs.view === 'drawing' && base === lastDraw.base && vs.drawing.line !== lastDraw.line;
+      if (vs.view === 'drawing') lastDraw = { base, line: vs.drawing.line };
+      if (lineOnly && fromSlider && r.roundTripMs != null && r.timings.analyzeMs === 0) {
+        const s = drawSlider;
+        s.samples.push(r.roundTripMs);
+        if (s.samples.length > 200) s.samples.shift();
+        drawSlider = { n: s.n + 1, max: Math.max(s.max, r.roundTripMs), samples: s.samples };
+      }
+      return;
+    }
     if (vs.view === 'highlight') {
       // A new target builds its ΔE histogram once; only tolerance/mode frames are slider frames.
       if (!fromSlider || r.roundTripMs == null || r.timings.histMs > 0.5 || r.timings.analyzeMs > 0) { drawHist(); return; }
@@ -350,7 +384,7 @@
 
   function report() {
     return {
-      schema: 'vishar-stage2-report/1',
+      schema: 'vishar-stage3-report/1',
       build: VERSION,
       at: new Date().toISOString(),
       userAgent: navigator.userAgent,
@@ -375,6 +409,14 @@
         highlightShare: last?.stats.highlight?.share ?? null,
         pipette: { picks: pickMs.length, p95Ms: p95(pickMs), lastMs: picked?.ms ?? null },
       },
+      stage3: {
+        compute: $state.snapshot(computeLog),
+        progressEvents,
+        drawingSlider: { frames: drawSlider.n, maxMs: drawSlider.max, p95Ms: p95(drawSlider.samples) },
+        svg: svgInfo,
+        simplify: $state.snapshot(vs.simplify),
+        drawing: $state.snapshot(vs.drawing),
+      },
     };
   }
 
@@ -392,11 +434,46 @@
 
   async function shareReport() {
     const text = JSON.stringify(report(), null, 1);
-    const file = new File([text], `vishar-stage2-${Date.now()}.json`, { type: 'application/json' });
+    const file = new File([text], `vishar-stage3-${Date.now()}.json`, { type: 'application/json' });
     try {
-      if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: 'Vishar Stage 2' });
+      if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: 'Vishar Stage 3' });
       else await navigator.share({ text });
     } catch {}
+  }
+
+  function download(blob: Blob, name: string) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+
+  /** Share sheet on iPhone (Files, Illustrator, Procreate), download elsewhere. */
+  async function shareFile(blob: Blob, name: string) {
+    const file = new File([blob], name, { type: blob.type });
+    try {
+      if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file] }); return; }
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') return;
+    }
+    download(blob, name);
+  }
+
+  async function exportSvg() {
+    if (!engine) return;
+    try {
+      const s = await engine.exportSvg(), blob = new Blob([s.svg], { type: 'image/svg+xml' });
+      svgInfo = { loops: s.loops, points: s.points, ms: s.ms, bytes: blob.size };
+      await shareFile(blob, `vishar-${vs.drawing.mode}.svg`);
+    } catch (e) {
+      error = String((e as Error)?.message ?? e);
+    }
+  }
+
+  async function exportInk() {
+    if (!engine) return;
+    await shareFile(await engine.exportInkPng(), `vishar-${vs.drawing.mode}-transparent.png`);
   }
 
   async function exportPng() {
@@ -414,7 +491,7 @@
 
 <main>
   <header>
-    <h1>Vishar Engine · Stage 2</h1>
+    <h1>Vishar Engine · Stage 3</h1>
     <p class="sub">Отладочная страница ядра, не интерфейс приложения · {VERSION}</p>
   </header>
 
@@ -453,12 +530,13 @@
     {/if}
     {#if !opened && !busy}<p class="hint">Открой фото или образец</p>{/if}
     {#if busy}<p class="hint">{busy}</p>{/if}
+    {#if progress > 0}<div class="progress"><span style="width: {Math.round(progress * 100)}%"></span></div>{/if}
   </div>
   {#if error}<p class="error">{error}</p>{/if}
 
   <nav class="tabs">
-    {#each [['original', 'Оригинал'], ['values', 'Values'], ['notan', 'Notan'], ['temperature', 'Temp'], ['highlight', 'Highlight']] as [v, label]}
-      <button class:active={vs.view === v} onclick={() => setView(v as ViewState['view'])}>{label}</button>
+    {#each TABS as [v, label]}
+      <button class:active={vs.view === v} onclick={() => setView(v)}>{label}</button>
     {/each}
   </nav>
 
@@ -570,9 +648,48 @@
           <button class:active={vs.highlight.mode === 'outline'} onclick={() => (vs.highlight.mode = 'outline')}>контур</button>
         </div>
       </div>
+    {:else if vs.view === 'simplify'}
+      <div class="row">
+        <span>Стиль</span>
+        <div class="seg">
+          {#each [['clustering', 'кластеры'], ['graph', 'граф'], ['posterize', 'постер']] as [v, label]}
+            <button class:active={vs.simplify.mode === v} onclick={() => (vs.simplify.mode = v as 'clustering')}>{label}</button>
+          {/each}
+        </div>
+      </div>
+      <label class="row">Детали <b>{vs.simplify.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.simplify.details} /></label>
+      <label class="row">Лимит цветов <b>{vs.simplify.paletteLimit || 'нет'}</b><input type="range" min="0" max="16" bind:value={vs.simplify.paletteLimit} /></label>
+      <label class="row check"><input type="checkbox" bind:checked={vs.simplify.keepDark} /> Сохранять тонкие тёмные элементы</label>
+      {#if vs.simplify.keepDark}
+        <label class="row">Темнее пятна на ΔL* <b>{vs.simplify.darkDelta}</b><input type="range" min="5" max="40" bind:value={vs.simplify.darkDelta} /></label>
+      {/if}
+    {:else if vs.view === 'drawing'}
+      <div class="row">
+        <span>Стиль</span>
+        <div class="seg">
+          <button class:active={vs.drawing.mode === 'sketch'} onclick={() => (vs.drawing.mode = 'sketch')}>Sketch</button>
+          <button class:active={vs.drawing.mode === 'contours'} onclick={() => (vs.drawing.mode = 'contours')}>Contours</button>
+        </div>
+      </div>
+      <label class="row">Line <b>{vs.drawing.line}</b><input type="range" min="0" max="100" bind:value={vs.drawing.line} /></label>
+      <label class="row">Stroke <b>{vs.drawing.stroke}</b><input type="range" min="1" max="5" bind:value={vs.drawing.stroke} /></label>
+      <label class="row check"><input type="checkbox" bind:checked={vs.drawing.invert} /> Инверсия</label>
+      <div class="row">
+        <button class="primary" onclick={exportSvg} disabled={!opened}>SVG</button>
+        <button onclick={exportInk} disabled={!opened}>PNG без фона</button>
+        <span class="muted">SVG для Illustrator, PNG без фона для Procreate (SVG он не открывает)</span>
+      </div>
+      {#if svgInfo}<p class="muted">SVG: {svgInfo.loops} контуров, {svgInfo.points} точек, {(svgInfo.bytes / 1024).toFixed(0)} КБ, {svgInfo.ms} мс</p>{/if}
     {/if}
 
-    {#if vs.view !== 'original'}<canvas class="hist" bind:this={hcanvas}></canvas>{/if}
+    {#if vs.view !== 'original' && vs.view !== 'simplify' && vs.view !== 'drawing'}<canvas class="hist" bind:this={hcanvas}></canvas>{/if}
+    {#if last?.stats.simplify}
+      {@const s = last.stats.simplify}
+      <p class="muted">Пятен {s.regions} · цветов {s.colors}{s.inkShare ? ` · тёмных элементов ${(s.inkShare * 100).toFixed(1)}%` : ''} · {s.ms.total} мс (сегментация {s.ms.segment}, слияние {s.ms.merge}, заливка {s.ms.paint}){last.timings.computeMs ? '' : ' · из кэша'}</p>
+    {/if}
+    {#if last?.stats.drawing}
+      <p class="muted">Линий {(last.stats.drawing.inkShare * 100).toFixed(1)}% площади · расчёт {last.timings.computeMs} мс, загрузка в GPU {last.timings.uploadMs} мс, туда-обратно {last.roundTripMs} мс</p>
+    {/if}
     {#if last?.stats.values}
       <div class="levels">
         {#each last.stats.values.gray as g, i}
@@ -653,6 +770,31 @@
   {/if}
 
   <section class="card">
+    <h2>Цели этапа 3</h2>
+    {#if opened}
+      <ul class="targets">
+        <li class={ok(!!computeLog.clustering && computeLog.clustering.ms <= TARGET3.clusteringMs)}>
+          Clustering: {computeLog.clustering ? `${computeLog.clustering.ms} мс на ${computeLog.clustering.work} (алгоритм ${computeLog.clustering.algoMs}), пятен ${computeLog.clustering.regions}` : 'открой Simplify, стиль «кластеры»'} (цель ≤ {TARGET3.clusteringMs})
+        </li>
+        <li class={ok(!!computeLog.graph && computeLog.graph.ms <= TARGET3.graphMs && progressEvents > 0)}>
+          Graph: {computeLog.graph ? `${computeLog.graph.ms} мс на ${computeLog.graph.work} (алгоритм ${computeLog.graph.algoMs}), пятен ${computeLog.graph.regions}, индикатор ${progressEvents ? 'есть' : 'нет'}` : 'стиль «граф»'} (цель ≤ {TARGET3.graphMs} с индикатором)
+        </li>
+        <li class={ok(!!computeLog.posterize)}>Posterize: {computeLog.posterize ? `${computeLog.posterize.ms} мс` : 'стиль «постер»'}</li>
+        <li class={ok(drawSlider.n > 0 && p95(drawSlider.samples) <= TARGET3.drawSliderMs)}>
+          Drawing, слайдер Line: {drawSlider.n ? `p95 ${p95(drawSlider.samples)} мс, макс ${drawSlider.max} мс, кадров ${drawSlider.n}` : 'подвигай Line'} (ориентир ≤ {TARGET3.drawSliderMs})
+        </li>
+        <li class={ok(!!svgInfo)}>SVG: {svgInfo ? `${svgInfo.loops} контуров, ${(svgInfo.bytes / 1024).toFixed(0)} КБ; открой в Illustrator` : 'нажми SVG во вкладке Drawing'}</li>
+      </ul>
+      <p class="muted">Время включает первое чтение пикселей из GPU; «алгоритм» — только расчёт на CPU.</p>
+      {#if computeLog.sketch || computeLog.contours}
+        <p class="muted">Первый расчёт Drawing: Sketch {computeLog.sketch?.ms ?? '—'} мс, Contours {computeLog.contours?.ms ?? '—'} мс (при смене Line пересчитывается только порог).</p>
+      {/if}
+    {:else}
+      <p class="muted">Открой фото: цели считаются на рабочей копии, для честного замера нужен образец 12 МП.</p>
+    {/if}
+  </section>
+
+  <section class="card">
     <h2>Цели этапа 2</h2>
     {#if opened}
       <ul class="targets">
@@ -702,11 +844,14 @@
 
   <section class="card">
     <h2>Сверка GPU и CPU</h2>
-    <p class="muted">Рендерит 15 режимов на 4 эталонных фото на GPU и на CPU и сравнивает пиксели. Плюс режим «как в оригинале» против порогов Color Study.</p>
+    <p class="muted">Рендерит 20 режимов на 4 эталонных фото на GPU и на CPU и сравнивает пиксели (Simplify и Drawing: результат CPU против показа на GPU). Плюс режим «как в оригинале» против порогов Color Study.</p>
     <button class="primary" onclick={runSelftest} disabled={!engine || !!busy}>Запустить сверку</button>
     {#if parity}
       <p class={ok(parity.pass)}>{parity.pass ? 'Совпадает' : 'Есть расхождения'} · {parity.cases.filter((c) => c.pass).length}/{parity.cases.length} · {parity.ms} мс · гистограммы ±{(parity.histogramMaxShareDiff * 100).toFixed(2)}%</p>
       <ul class="compact">
+        {#each parity.cases.filter((c) => c.computeMs != null && c.fixture === 'stilllife') as c}
+          <li class={ok(c.pass)}>{c.name}: {c.computeMs} мс на 1024×768</li>
+        {/each}
         {#each parity.compat as c}
           <li class={ok(c.agreement >= 0.95)}>Как в оригинале, {c.fixture}: {(c.agreement * 100).toFixed(1)}% пикселей</li>
         {/each}
@@ -799,7 +944,9 @@
   button:disabled { opacity: 0.5; }
   .chip { font-size: 13px; padding: 4px 9px; }
   .primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  .tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-top: 10px; }
+  .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 4px; margin-top: 10px; }
+  .progress { position: absolute; left: 12px; right: 12px; bottom: 12px; height: 6px; border-radius: 3px; background: rgba(0, 0, 0, 0.25); overflow: hidden; }
+  .progress span { display: block; height: 100%; background: var(--accent); transition: width 0.1s; }
   .tabs button { font-size: 13px; }
   .overlay { position: absolute; inset: 0; pointer-events: none; }
   .overlay line { stroke: #fff; stroke-width: 1.5; opacity: 0.85; filter: drop-shadow(0 0 1px #000); }

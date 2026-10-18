@@ -52,6 +52,21 @@ try {
   }
   const pick = await page.evaluate(() => window.__engineDev.pick(0.5, 0.5, 5));
   console.log(`  pipette 5×5 at centre: ${pick.info.codes.HEX} «${pick.info.name}», ${pick.ms} ms`);
+
+  // Stage 3 on the same working copy: Simplify styles, Drawing, SVG.
+  for (const mode of ['clustering', 'graph', 'posterize']) {
+    const r = await page.evaluate((m) => window.__engineDev.set({ view: 'simplify', simplify: { mode: m, details: 4, paletteLimit: 0, keepDark: false, darkDelta: 18 } }), mode);
+    const st = r.lastFrame.stats.simplify;
+    console.log(`simplify ${mode}: compute ${r.lastFrame.timings.computeMs} ms, upload ${r.lastFrame.timings.uploadMs} ms, regions ${st.regions}, colours ${st.colors}`);
+    if (!st.regions) failed = true;
+  }
+  for (const [mode, line] of [['sketch', 50], ['sketch', 51], ['contours', 50], ['contours', 51]]) {
+    const r = await page.evaluate(([m, l]) => window.__engineDev.set({ view: 'drawing', drawing: { mode: m, line: l, stroke: 2, invert: false } }), [mode, line]);
+    console.log(`drawing ${mode} line ${line}: compute ${r.lastFrame.timings.computeMs} ms, upload ${r.lastFrame.timings.uploadMs} ms, round trip ${r.lastFrame.roundTripMs} ms, ink ${r.lastFrame.stats.drawing.inkShare}`);
+  }
+  const svg = await page.evaluate(() => window.__engineDev.svg());
+  console.log(`svg: ${svg.loops} outlines, ${svg.points} points, ${(svg.bytes / 1024).toFixed(0)} KB, ${svg.ms} ms`);
+  if (!svg.head.includes('<svg') || !svg.loops) failed = true;
   await page.screenshot({ path: process.env.SHOT || 'dist/screenshot.png', fullPage: true });
 } finally {
   await browser.close();
