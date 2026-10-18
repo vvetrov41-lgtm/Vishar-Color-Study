@@ -39,12 +39,17 @@ REA подключается только к loopback-эндпоинту и ра
 
 Поменять версию в `.mcp.json` и `scripts/rea-warmup.sh`, проверить `npm view rea-agents dist-tags`.
 
-## Cloud Environment Setup Script (необязательно)
+## REA во всех репозиториях среды (Cloud Environment Setup Script)
 
-Настройки среды меняются в UI: claude.ai/code → выбор среды → Setup script. Вставить:
+`.mcp.json` работает только в этом репозитории. Чтобы REA был в любом репозитории среды,
+вставь содержимое `scripts/rea-env-setup.sh` в настройки среды:
+claude.ai/code → меню среды в заголовке сессии → Edit → Setup script → Save.
 
-    #!/bin/bash
-    npx -y rea-agents@6.5.0 --version
+Скрипт:
+- прогревает кэш `npx -y rea-agents@6.5.0`;
+- добавляет `mcpServers.rea` в `~/.claude.json` (user scope), остальные записи не трогает;
+- идемпотентен (повторный запуск ничего не меняет) и всегда завершается с кодом 0.
 
-Это кладёт пакет в кэш образа. Без него всё работает: первый запуск сервера занимает около 15 секунд.
 Сетевая политика среды должна пускать `registry.npmjs.org`.
+Проверка в новой сессии: `claude mcp get rea` показывает `Scope: User config`.
+Если у репозитория есть свой `.mcp.json` с `rea`, действует он (project scope важнее user); версии держать одинаковыми.
