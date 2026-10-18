@@ -1,0 +1,24 @@
+{
+  "name": "vishar-stage0-bench",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Stage 0 diagnostic PWA bench for the Vishar Color Study engine (iPhone Safari)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "samples": "python3 scripts/gen-samples.py",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.1.1",
+    "@tsconfig/svelte": "^5.0.8",
+    "playwright-core": "^1.64.1",
+    "svelte": "^5.57.2",
+    "svelte-check": "^4.7.7",
+    "typescript": "~5.9.3",
+    "vite": "^6.4.4"
+  }
+}

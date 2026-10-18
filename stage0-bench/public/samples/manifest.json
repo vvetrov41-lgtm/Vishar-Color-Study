@@ -1,0 +1,47 @@
+{
+  "probe.jpg": {
+    "bytes": 39041,
+    "width": 640,
+    "height": 480
+  },
+  "probe.png": {
+    "bytes": 564511,
+    "width": 640,
+    "height": 480
+  },
+  "probe.webp": {
+    "bytes": 11552,
+    "width": 640,
+    "height": 480
+  },
+  "probe.heic": {
+    "bytes": 165144,
+    "width": 640,
+    "height": 480
+  },
+  "orient6.jpg": {
+    "bytes": 717,
+    "width": 64,
+    "height": 32
+  },
+  "synth_12mp.jpg": {
+    "bytes": 965337,
+    "width": 4032,
+    "height": 3024
+  },
+  "synth_12mp.heic": {
+    "bytes": 1601801,
+    "width": 4032,
+    "height": 3024
+  },
+  "synth_48mp.jpg": {
+    "bytes": 3690926,
+    "width": 8064,
+    "height": 6048
+  },
+  "synth_48mp.heic": {
+    "bytes": 6893749,
+    "width": 8064,
+    "height": 6048
+  }
+}
