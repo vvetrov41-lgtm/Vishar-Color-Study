@@ -1,0 +1,12 @@
+{
+  "enabledMcpjsonServers": ["rea"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/rea-warmup.sh\"", "timeout": 120 }
+        ]
+      }
+    ]
+  }
+}
