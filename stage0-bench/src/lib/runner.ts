@@ -611,7 +611,10 @@ export class Runner {
     try {
       ({ blob, ms: fetchMs, fromCache } = await fetchBlob(url));
     } catch (e) {
-      this.add({ id, group: 'perf', name: label, status: 'skip', note: errMsg(e) });
+      const note = navigator.onLine
+        ? errMsg(e)
+        : 'образец не скачан в этой копии стенда: у иконки на экране «Домой» своё хранилище, открой её один раз с сетью и нажми Run Tests';
+      this.add({ id, group: 'perf', name: label, status: 'skip', note });
       return;
     }
     await this.pipeline(id, label, blob, opts, { fetchMs, fetchSource: fromCache });

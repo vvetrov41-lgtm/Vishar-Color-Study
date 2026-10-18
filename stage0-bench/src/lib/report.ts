@@ -36,7 +36,12 @@ export function textReport(r: Report): string {
   lines.push(`Прогон ${r.runId}, ${new Date(r.startedAt).toLocaleString('ru-RU')}, ${Math.round(r.durationMs / 1000)} с`);
   lines.push(r.userAgent);
   if (r.previousCrashes.length) {
-    for (const c of r.previousCrashes) lines.push(`💥 Прогон не завершился на шаге «${c.stepLabel ?? c.step}» (${c.at}): вкладка перезагрузилась или была закрыта`);
+    for (const c of r.previousCrashes)
+      lines.push(
+        c.kind === 'memory-stress'
+          ? `💥 Стресс-тест: iOS выгрузила вкладку на шаге «${c.stepLabel ?? c.step}» (${c.at})`
+          : `💥 Прогон не завершился на шаге «${c.stepLabel ?? c.step}» (${c.at}): вкладка перезагрузилась или была закрыта`,
+      );
   }
   const counts = { pass: 0, fail: 0, warn: 0, info: 0, skip: 0 };
   for (const c of r.checks) counts[c.status]++;

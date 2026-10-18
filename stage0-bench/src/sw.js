@@ -31,7 +31,7 @@ function tagged(resp, how) {
 
 async function fromShell(req) {
   const c = await caches.open(SHELL);
-  return c.match(req, { ignoreSearch: true });
+  return c.match(req, { ignoreSearch: true, ignoreVary: true });
 }
 
 self.addEventListener('fetch', (event) => {
@@ -53,9 +53,15 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname.includes('/samples/')) {
     event.respondWith(
       caches.open(SAMPLES).then(async (c) => {
-        const hit = (await c.match(req)) || (await fromShell(req));
+        const hit = (await c.match(req, { ignoreVary: true })) || (await fromShell(req));
         if (hit) return tagged(hit, 'cache');
-        const resp = await fetch(req);
+        let resp;
+        try {
+          resp = await fetch(req);
+        } catch {
+          // Offline and never downloaded in this storage container.
+          return new Response('sample not cached', { status: 504, headers: { 'x-bench-cache': 'miss-offline' } });
+        }
         if (resp.ok) await c.put(req, resp.clone());
         return tagged(resp, 'network');
       }),
