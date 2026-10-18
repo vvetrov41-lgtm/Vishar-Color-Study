@@ -272,6 +272,8 @@ class Engine {
       ['temperature shaded absolute', { ...base, view: 'temperature', temperature: { mode: 'absolute', style: 'shaded', balance: 0 } }],
       ['temperature two', { ...base, view: 'temperature', temperature: { ...base.temperature, style: 'two' } }],
       ['highlight skin ΔE 15', { ...base, view: 'highlight', highlight: { target: [65, 15, 20], tolerance: 15, mode: 'highlight' } }],
+      // Same red without the outline: tells ΔE precision apart from neighbour sampling.
+      ['highlight red ΔE 20', { ...base, view: 'highlight', highlight: { target: [45, 55, 35], tolerance: 20, mode: 'highlight' } }],
       ['highlight red ΔE 20 outline', { ...base, view: 'highlight', highlight: { target: [45, 55, 35], tolerance: 20, mode: 'outline' } }],
       ['highlight grey ΔE 8 outline', { ...base, view: 'highlight', highlight: { target: [50, 0, 0], tolerance: 8, mode: 'outline' } }],
     ];

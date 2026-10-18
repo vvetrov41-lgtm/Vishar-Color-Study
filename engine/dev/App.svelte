@@ -694,7 +694,7 @@
 
   <section class="card">
     <h2>Сверка GPU и CPU</h2>
-    <p class="muted">Рендерит 14 режимов на 4 эталонных фото на GPU и на CPU и сравнивает пиксели. Плюс режим «как в оригинале» против порогов Color Study.</p>
+    <p class="muted">Рендерит 15 режимов на 4 эталонных фото на GPU и на CPU и сравнивает пиксели. Плюс режим «как в оригинале» против порогов Color Study.</p>
     <button class="primary" onclick={runSelftest} disabled={!engine || !!busy}>Запустить сверку</button>
     {#if parity}
       <p class={ok(parity.pass)}>{parity.pass ? 'Совпадает' : 'Есть расхождения'} · {parity.cases.filter((c) => c.pass).length}/{parity.cases.length} · {parity.ms} мс · гистограммы ±{(parity.histogramMaxShareDiff * 100).toFixed(2)}%</p>

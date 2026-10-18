@@ -145,9 +145,11 @@ float de2000(vec3 l1, vec3 l2) {
 }
 
 // Outside the image counts as matching: no contour along the frame.
+// Called in non-uniform control flow, where implicit derivatives are undefined and a
+// GPU may pick a blurred mip level (Apple GPU did): sample level 0 explicitly.
 bool matchAt(vec2 uv) {
   if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return true;
-  return de2000(srgbToLab(texture(uSrc, uv).rgb), uHlTarget) <= uHlTol;
+  return de2000(srgbToLab(textureLod(uSrc, uv, 0.0).rgb), uHlTarget) <= uHlTol;
 }
 
 void main() {
