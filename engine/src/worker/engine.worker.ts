@@ -1,0 +1,250 @@
+// Engine Worker: decoding, the working copy, GPU passes and histograms.
+// The main thread only sends view states and receives numbers (or a frame).
+
+import * as Comlink from 'comlink';
+import { srgbToLab, luma601 } from '../core/color';
+import { ORIGINAL_VALUES_9, levelAgreement } from '../core/compat';
+import { histogramsFromLab8, type Histograms } from '../core/histogram';
+import { fitLongSide, HEADER_BYTES, parseImageInfo } from '../core/imageinfo';
+import { DEFAULT_VIEW, planView, renderReference, type Smoothing, type ViewPlan, type ViewState } from '../core/view';
+import { levelOf, valuesThresholds } from '../core/values';
+import { Renderer, type ScreenRect } from '../gpu/renderer';
+import type { Caps, CompatCase, OpenOptions, OpenResult, ParityCase, ParityReport, ViewResult } from '../types';
+
+const now = () => performance.now();
+const round1 = (v: number) => Math.round(v * 10) / 10;
+
+interface Analysis { lab8: Uint8Array; hist: Histograms }
+
+export const LADDER = [1600, 1200, 800];
+
+class Engine {
+  private r: Renderer | null = null;
+  private present: Caps['present'] = 'canvas';
+  private analysis = new Map<Smoothing, Analysis>();
+  private state: ViewState = DEFAULT_VIEW;
+  private plan: ViewPlan | null = null;
+  private screen = { cssW: 1, cssH: 1, dpr: 1, bg: [128, 128, 128] as [number, number, number] };
+
+  init(canvas?: OffscreenCanvas): Caps {
+    this.present = canvas ? 'canvas' : 'bitmap';
+    this.r = new Renderer(canvas ?? new OffscreenCanvas(1, 1));
+    const gl = this.r.gl, dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    return {
+      present: this.present,
+      maxTextureSize: this.r.maxTextureSize,
+      renderer: String(dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)),
+    };
+  }
+
+  private get renderer(): Renderer {
+    if (!this.r) throw new Error('engine not initialised');
+    if (this.r.lost || this.r.gl.isContextLost()) throw new Error('WebGL-контекст потерян, перезагрузи страницу');
+    return this.r;
+  }
+
+  async open(blob: Blob, opts: OpenOptions = {}): Promise<OpenResult> {
+    const r = this.renderer, t: Record<string, number> = {}, warnings: string[] = [];
+    let t0 = now();
+    const info = parseImageInfo(new Uint8Array(await blob.slice(0, HEADER_BYTES).arrayBuffer()));
+    let sizeFrom: 'header' | 'probe' = 'header';
+    let { width: w, height: h } = info;
+    t.header = now() - t0;
+    if (!w || !h) {
+      // Size unknown from the header: a tiny decode gives the displayed aspect ratio.
+      t0 = now();
+      const probe = await createImageBitmap(blob, { resizeWidth: 64, resizeQuality: 'pixelated', imageOrientation: 'from-image' });
+      w = probe.width;
+      h = probe.height;
+      probe.close();
+      sizeFrom = 'probe';
+      t.probe = now() - t0;
+    }
+    const budget = (opts.budgetMB ?? 512) * 1024 * 1024;
+    const ladder = [opts.workLong ?? LADDER[0], ...LADDER.filter((v) => v < (opts.workLong ?? LADDER[0]))];
+    let bitmap: ImageBitmap | null = null, step = 0, method: OpenResult['method'] = 'decode-to-size';
+    t0 = now();
+    for (; step < ladder.length && !bitmap; step++) {
+      const long = ladder[step];
+      const [tw, th] = sizeFrom === 'probe'
+        ? (w >= h ? [long, Math.round((long * h) / w)] : [Math.round((long * w) / h), long])
+        : fitLongSide(w, h, long);
+      try {
+        const b = await createImageBitmap(blob, {
+          resizeWidth: tw, resizeHeight: th, resizeQuality: 'high', imageOrientation: 'from-image', premultiplyAlpha: 'none',
+        });
+        if (b.width === tw && b.height === th) { bitmap = b; break; }
+        warnings.push(`decode-to-size вернул ${b.width}×${b.height} вместо ${tw}×${th}`);
+        b.close();
+      } catch (e) {
+        warnings.push(`decode-to-size ${tw}×${th}: ${(e as Error).message}`);
+      }
+      // Fallback: one full decode, downscale on a canvas, free the full frame at once.
+      if (sizeFrom === 'header' && w * h * 4 > budget) {
+        warnings.push(`полное декодирование ${w}×${h} не влезает в бюджет ${opts.budgetMB ?? 512} МБ, пропускаю`);
+        continue;
+      }
+      try {
+        const full = await createImageBitmap(blob, { imageOrientation: 'from-image', premultiplyAlpha: 'none' });
+        const c = new OffscreenCanvas(tw, th), ctx = c.getContext('2d')!;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(full, 0, 0, tw, th);
+        full.close();
+        bitmap = c.transferToImageBitmap();
+        method = 'full-decode+downscale';
+        break;
+      } catch (e) {
+        warnings.push(`полное декодирование: ${(e as Error).message}`);
+      }
+    }
+    if (!bitmap) throw new Error('не удалось декодировать фото: ' + warnings.join('; '));
+    t.decode = now() - t0;
+    t0 = now();
+    r.setSource(bitmap);
+    const work = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+    this.analysis.clear();
+    this.plan = null;
+    t.upload = now() - t0;
+    for (const k in t) t[k] = round1(t[k]);
+    return { info: { ...info, width: w, height: h, sizeFrom }, work, step, method, warnings, timings: t };
+  }
+
+  private analyzed(level: Smoothing): { a: Analysis; ms: number } {
+    const hit = this.analysis.get(level);
+    if (hit) return { a: hit, ms: 0 };
+    const t0 = now(), lab8 = this.renderer.analyze(level), a = { lab8, hist: histogramsFromLab8(lab8) };
+    this.analysis.set(level, a);
+    return { a, ms: now() - t0 };
+  }
+
+  /** Image rect inside the canvas, 0..1 units, letterboxed. */
+  private rect(): ScreenRect {
+    const r = this.renderer, cw = r.canvas.width, ch = r.canvas.height;
+    const s = Math.min(cw / r.w, ch / r.h), w = (r.w * s) / cw, h = (r.h * s) / ch;
+    return { x: (1 - w) / 2, y: (1 - h) / 2, w, h };
+  }
+
+  resize(cssW: number, cssH: number, dpr: number, bg?: [number, number, number]) {
+    this.screen = { cssW, cssH, dpr, bg: bg ?? this.screen.bg };
+    const r = this.renderer, cap = Math.min(4096, r.maxTextureSize);
+    r.canvas.width = Math.max(1, Math.min(cap, Math.round(cssW * dpr)));
+    r.canvas.height = Math.max(1, Math.min(cap, Math.round(cssH * dpr)));
+    return this.r && this.r.w ? this.setView(this.state) : null;
+  }
+
+  setView(state: ViewState): ViewResult {
+    const r = this.renderer, t0 = now();
+    this.state = state;
+    const { a, ms: analyzeMs } = this.analyzed(state.smoothing);
+    const t1 = now();
+    const { plan, stats } = planView(state, a.hist);
+    this.plan = plan;
+    const t2 = now();
+    r.renderScreen(plan, state.smoothing, this.rect(), this.screen.bg);
+    r.finish();
+    const t3 = now();
+    const hist = state.view === 'temperature' ? a.hist.warmth : a.hist[state.view === 'notan' ? state.notan.scale : state.values.scale];
+    const res: ViewResult = {
+      stats,
+      hist: Array.from(hist),
+      timings: { analyzeMs: round1(analyzeMs), planMs: round1(t2 - t1), renderMs: round1(t3 - t2), totalMs: round1(t3 - t0) },
+    };
+    if (this.present === 'bitmap') {
+      res.frame = r.canvas.transferToImageBitmap();
+      return Comlink.transfer(res, [res.frame]);
+    }
+    return res;
+  }
+
+  /** Values level under a point of the canvas (CSS px), −1 outside the image. */
+  pick(x: number, y: number): number {
+    const r = this.renderer, rect = this.rect();
+    const u = (x / this.screen.cssW - rect.x) / rect.w, v = (y / this.screen.cssH - rect.y) / rect.h;
+    if (u < 0 || v < 0 || u >= 1 || v >= 1 || !this.plan || this.state.view !== 'values') return -1;
+    const a = this.analysis.get(this.state.smoothing);
+    if (!a) return -1;
+    const i = (Math.floor(v * r.h) * r.w + Math.floor(u * r.w)) * 4;
+    const tone = this.plan.scale === 1 ? a.lab8[i + 3] : a.lab8[i];
+    return levelOf(tone, this.plan.thresholds);
+  }
+
+  /** Working copy rendered with the current view at work size, as PNG. */
+  async exportWork(): Promise<Blob> {
+    const r = this.renderer;
+    if (!this.plan) throw new Error('нечего экспортировать');
+    const px = r.renderPixels(this.plan, this.state.smoothing);
+    const c = new OffscreenCanvas(r.w, r.h);
+    c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(px.buffer as ArrayBuffer), r.w, r.h), 0, 0);
+    return c.convertToBlob({ type: 'image/png' });
+  }
+
+  /**
+   * GPU ↔ CPU parity on the reference photos: every case renders on the GPU and through
+   * renderReference() from the same source pixels. Also checks the compatibility mode
+   * against the original's Values thresholds.
+   */
+  async selftest(fixtures: Record<string, string>): Promise<ParityReport> {
+    const t0 = now(), cases: ParityCase[] = [], compat: CompatCase[] = [];
+    let histDiff = 0;
+    const base = DEFAULT_VIEW;
+    const variants: Array<[string, ViewState]> = [
+      ['values L* k-means 9', { ...base, view: 'values' }],
+      ['values luma (как в оригинале) 9', { ...base, view: 'values', values: { ...base.values, scale: 'luma' } }],
+      ['values √count 4 + Show Hue', { ...base, view: 'values', values: { ...base.values, levels: 4, method: 'kmeans-sqrt', showHue: true } }],
+      ['values even 6 + brightness + highlight', { ...base, view: 'values', values: { ...base.values, levels: 6, method: 'even', brightness: 10, highlight: 2 } }],
+      ['values smoothing strong', { ...base, view: 'values', smoothing: 2 }],
+      ['notan otsu', { ...base, view: 'notan' }],
+      ['notan median 3 + invert', { ...base, view: 'notan', notan: { ...base.notan, mode: 'median', levels: 3, invert: true } }],
+      ['notan auto luma', { ...base, view: 'notan', notan: { ...base.notan, mode: 'auto', scale: 'luma' } }],
+      ['temperature map', { ...base, view: 'temperature' }],
+      ['temperature shaded absolute', { ...base, view: 'temperature', temperature: { mode: 'absolute', style: 'shaded', balance: 0 } }],
+      ['temperature two', { ...base, view: 'temperature', temperature: { ...base.temperature, style: 'two' } }],
+    ];
+    for (const [name, url] of Object.entries(fixtures)) {
+      const blob = await (await fetch(url)).blob();
+      await this.open(blob, { workLong: 1024 });
+      const r = this.renderer;
+      // Histograms from the GPU analysis buffer vs L* computed on the CPU.
+      const src0 = r.readSource(0), { a } = this.analyzed(0), cpuHist = new Float64Array(256);
+      const n = src0.length >> 2, luma = new Float64Array(n);
+      for (let i = 0, j = 0; i < n; i++, j += 4) {
+        const L = srgbToLab(src0[j], src0[j + 1], src0[j + 2])[0];
+        cpuHist[Math.min(255, Math.max(0, Math.round(L * 2.55)))]++;
+        luma[i] = luma601(src0[j], src0[j + 1], src0[j + 2]);
+      }
+      let hd = 0;
+      for (let v = 0; v < 256; v++) hd += Math.abs(cpuHist[v] - a.hist.lstar[v]);
+      histDiff = Math.max(histDiff, hd / 2 / n);
+      if (ORIGINAL_VALUES_9[name]) {
+        const ours = valuesThresholds(a.hist.luma, { levels: 9, method: 'kmeans' }, true);
+        compat.push({ fixture: name, ours: ours.map(round1), original: ORIGINAL_VALUES_9[name], agreement: levelAgreement(luma, ours, ORIGINAL_VALUES_9[name]) });
+      }
+      for (const [vname, state] of variants) {
+        const { a: an } = this.analyzed(state.smoothing);
+        const { plan } = planView(state, an.hist);
+        const gpu = r.renderPixels(plan, state.smoothing), cpu = renderReference(r.readSource(state.smoothing), plan);
+        let se = 0, bad = 0, maxDiff = 0;
+        for (let j = 0; j < gpu.length; j += 4) {
+          const d = Math.max(Math.abs(gpu[j] - cpu[j]), Math.abs(gpu[j + 1] - cpu[j + 1]), Math.abs(gpu[j + 2] - cpu[j + 2]));
+          if (d > maxDiff) maxDiff = d;
+          if (d > 2) bad++;
+          if (d) se += (srgbToLab(gpu[j], gpu[j + 1], gpu[j + 2])[0] - srgbToLab(cpu[j], cpu[j + 1], cpu[j + 2])[0]) ** 2;
+        }
+        const mseL = se / n, mismatch = bad / n;
+        cases.push({ fixture: name, name: vname, mseL: Math.round(mseL * 1000) / 1000, mismatch: Math.round(mismatch * 1e5) / 1e5, maxDiff, pass: mseL <= 1 && mismatch <= 0.005 });
+      }
+    }
+    this.analysis.clear();
+    this.renderer.clear();
+    this.plan = null;
+    return {
+      cases, compat, histogramMaxShareDiff: Math.round(histDiff * 1e5) / 1e5,
+      pass: cases.every((c) => c.pass) && histDiff <= 0.01,
+      ms: Math.round(now() - t0),
+    };
+  }
+}
+
+export type EngineApi = Engine;
+Comlink.expose(new Engine());
