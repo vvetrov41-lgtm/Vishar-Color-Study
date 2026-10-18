@@ -13,6 +13,7 @@ export class EngineClient {
   private inflight = false;
   private pending: { state: ViewState; waiters: Resolver[] } | null = null;
   private bitmapCtx: ImageBitmapRenderingContext | null = null;
+  private idleWaiters: Array<() => void> = [];
 
   private constructor(
     private readonly worker: Worker,
@@ -72,7 +73,17 @@ export class EngineClient {
       const next = this.pending;
       this.pending = null;
       if (next) void this.run(next.state, next.waiters);
+      else {
+        const w = this.idleWaiters;
+        this.idleWaiters = [];
+        w.forEach((f) => f());
+      }
     }
+  }
+
+  /** Resolves once the frame in flight and any queued state have rendered. */
+  private settled(): Promise<void> {
+    return this.inflight ? new Promise((ok) => this.idleWaiters.push(ok)) : Promise.resolve();
   }
 
   pick(x: number, y: number): Promise<number> {
@@ -94,16 +105,20 @@ export class EngineClient {
   }
 
   /** Current Drawing as SVG (the view must be 'drawing'). */
-  exportSvg(): Promise<SvgExport> {
+  async exportSvg(): Promise<SvgExport> {
+    // Exports read the Worker's current view: let the latest queued state land first.
+    await this.settled();
     return this.api.exportSvg();
   }
 
   /** Current Drawing as a transparent PNG (for Procreate, which has no SVG import). */
-  exportInkPng(): Promise<Blob> {
+  async exportInkPng(): Promise<Blob> {
+    await this.settled();
     return this.api.exportInkPng();
   }
 
-  exportWork(): Promise<Blob> {
+  async exportWork(): Promise<Blob> {
+    await this.settled();
     return this.api.exportWork();
   }
 
