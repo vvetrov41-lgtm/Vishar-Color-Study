@@ -3,13 +3,16 @@
 
 import * as Comlink from 'comlink';
 import { srgbToLab, luma601 } from '../core/color';
+import { colorInfo, type Lab } from '../core/colorinfo';
+import { deltaHistogram, matchedShare } from '../core/highlight';
+import { DEFAULT_PALETTE, extractPalette, meanRgb, sampleGrid, square, type Grid, type PaletteParams } from '../core/palette';
 import { ORIGINAL_VALUES_9, levelAgreement } from '../core/compat';
 import { histogramsFromLab8, type Histograms } from '../core/histogram';
 import { fitLongSide, HEADER_BYTES, parseImageInfo } from '../core/imageinfo';
 import { DEFAULT_VIEW, planView, renderReference, type Smoothing, type ViewPlan, type ViewState } from '../core/view';
 import { levelOf, valuesThresholds } from '../core/values';
 import { Renderer, type ScreenRect } from '../gpu/renderer';
-import type { Caps, CompatCase, OpenOptions, OpenResult, ParityCase, ParityReport, ViewResult } from '../types';
+import type { Caps, CompatCase, OpenOptions, OpenResult, PaletteResult, ParityCase, ParityReport, PickResult, ViewResult } from '../types';
 
 const now = () => performance.now();
 const round1 = (v: number) => Math.round(v * 10) / 10;
@@ -17,6 +20,8 @@ const round1 = (v: number) => Math.round(v * 10) / 10;
 interface Analysis { lab8: Uint8Array; hist: Histograms }
 
 export const LADDER = [1600, 1200, 800];
+/** Loupe size in working-copy pixels. */
+export const LOUPE = 21;
 
 class Engine {
   private r: Renderer | null = null;
@@ -25,6 +30,34 @@ class Engine {
   private state: ViewState = DEFAULT_VIEW;
   private plan: ViewPlan | null = null;
   private screen = { cssW: 1, cssH: 1, dpr: 1, bg: [128, 128, 128] as [number, number, number] };
+  // Per photo, built on first use: unsmoothed pixels for the pipette and palette, the grid
+  // sample, and the ΔE histogram of the current Highlight target.
+  private px: Uint8Array | null = null;
+  private grid: Grid | null = null;
+  private dHist: { key: string; h: Float64Array } | null = null;
+
+  private reset() {
+    this.analysis.clear();
+    this.plan = null;
+    this.px = null;
+    this.grid = null;
+    this.dHist = null;
+  }
+
+  private pixels(): Uint8Array {
+    return (this.px ??= this.renderer.readSource(0));
+  }
+
+  private sample(): Grid {
+    const r = this.renderer;
+    return (this.grid ??= sampleGrid(this.pixels(), r.w, r.h));
+  }
+
+  private deltaHist(target: Lab): Float64Array {
+    const key = target.join(',');
+    if (this.dHist?.key !== key) this.dHist = { key, h: deltaHistogram(this.sample(), target) };
+    return this.dHist.h;
+  }
 
   init(canvas?: OffscreenCanvas): Caps {
     this.present = canvas ? 'canvas' : 'bitmap';
@@ -108,8 +141,7 @@ class Engine {
     r.setSource(bitmap);
     const work = { width: bitmap.width, height: bitmap.height };
     bitmap.close();
-    this.analysis.clear();
-    this.plan = null;
+    this.reset();
     t.upload = now() - t0;
     for (const k in t) t[k] = round1(t[k]);
     return { info: { ...info, width: w, height: h, sizeFrom }, work, step, method, warnings, timings: t };
@@ -149,11 +181,21 @@ class Engine {
     r.renderScreen(plan, state.smoothing, this.rect(), this.screen.bg);
     r.finish();
     const t3 = now();
-    const hist = state.view === 'temperature' ? a.hist.warmth : a.hist[state.view === 'notan' ? state.notan.scale : state.values.scale];
+    let hist: ArrayLike<number> = state.view === 'temperature' ? a.hist.warmth : a.hist[state.view === 'notan' ? state.notan.scale : state.values.scale];
+    let histMs = 0;
+    if (state.view === 'highlight') {
+      const tg = state.highlight.target, th = now();
+      hist = tg ? this.deltaHist(tg) : [];
+      histMs = now() - th;
+      stats.highlight = { share: tg ? Math.round(matchedShare(hist, state.highlight.tolerance) * 1e4) / 1e4 : 0 };
+    }
+    const t4 = now();
     const res: ViewResult = {
       stats,
       hist: Array.from(hist),
-      timings: { analyzeMs: round1(analyzeMs), planMs: round1(t2 - t1), renderMs: round1(t3 - t2), totalMs: round1(t3 - t0) },
+      timings: { analyzeMs: round1(analyzeMs), planMs: round1(t2 - t1 + t4 - t3), renderMs: round1(t3 - t2), totalMs: round1(t4 - t0), histMs: round1(histMs) },
+      rect: this.rect(),
+      work: { width: r.w, height: r.h },
     };
     if (this.present === 'bitmap') {
       res.frame = r.canvas.transferToImageBitmap();
@@ -172,6 +214,30 @@ class Engine {
     const i = (Math.floor(v * r.h) * r.w + Math.floor(u * r.w)) * 4;
     const tone = this.plan.scale === 1 ? a.lab8[i + 3] : a.lab8[i];
     return levelOf(tone, this.plan.thresholds);
+  }
+
+  /** Palette of the unsmoothed working copy. */
+  palette(params: PaletteParams = DEFAULT_PALETTE): PaletteResult {
+    const t0 = now(), px = this.pixels(), t1 = now(), g = this.sample(), t2 = now(), p = extractPalette(px, g, params);
+    return { ...p, totalMs: Math.round(now() - t0), readMs: Math.round(t1 - t0), gridMs: Math.round(t2 - t1) };
+  }
+
+  /**
+   * Pipette at (u, v), 0..1 of the working copy: size×size average in linear RGB on the
+   * unsmoothed copy, with the colour card and a loupe patch.
+   */
+  pickColor(u: number, v: number, size: number): PickResult | null {
+    const r = this.renderer, t0 = now();
+    if (u < 0 || v < 0 || u >= 1 || v >= 1) return null;
+    const px = this.pixels(), x = Math.floor(u * r.w), y = Math.floor(v * r.h);
+    const rgb = meanRgb(px, square(x, y, size, r.w, r.h));
+    const patch = new Uint8Array(LOUPE * LOUPE * 4), o = LOUPE >> 1;
+    for (let j = 0; j < LOUPE; j++) for (let i = 0; i < LOUPE; i++) {
+      const xx = Math.min(r.w - 1, Math.max(0, x + i - o)), yy = Math.min(r.h - 1, Math.max(0, y + j - o));
+      patch.set(px.subarray((yy * r.w + xx) * 4, (yy * r.w + xx) * 4 + 4), (j * LOUPE + i) * 4);
+    }
+    const res: PickResult = { x, y, size, info: colorInfo(rgb), patch, ms: round1(now() - t0) };
+    return Comlink.transfer(res, [patch.buffer]);
   }
 
   /** Working copy rendered with the current view at work size, as PNG. */
@@ -205,6 +271,9 @@ class Engine {
       ['temperature map', { ...base, view: 'temperature' }],
       ['temperature shaded absolute', { ...base, view: 'temperature', temperature: { mode: 'absolute', style: 'shaded', balance: 0 } }],
       ['temperature two', { ...base, view: 'temperature', temperature: { ...base.temperature, style: 'two' } }],
+      ['highlight skin ΔE 15', { ...base, view: 'highlight', highlight: { target: [65, 15, 20], tolerance: 15, mode: 'highlight' } }],
+      ['highlight red ΔE 20 outline', { ...base, view: 'highlight', highlight: { target: [45, 55, 35], tolerance: 20, mode: 'outline' } }],
+      ['highlight grey ΔE 8 outline', { ...base, view: 'highlight', highlight: { target: [50, 0, 0], tolerance: 8, mode: 'outline' } }],
     ];
     for (const [name, url] of Object.entries(fixtures)) {
       const blob = await (await fetch(url)).blob();
@@ -228,7 +297,7 @@ class Engine {
       for (const [vname, state] of variants) {
         const { a: an } = this.analyzed(state.smoothing);
         const { plan } = planView(state, an.hist);
-        const gpu = r.renderPixels(plan, state.smoothing), cpu = renderReference(r.readSource(state.smoothing), plan);
+        const gpu = r.renderPixels(plan, state.smoothing), cpu = renderReference(r.readSource(state.smoothing), plan, r.w);
         let se = 0, bad = 0, maxDiff = 0;
         for (let j = 0; j < gpu.length; j += 4) {
           const d = Math.max(Math.abs(gpu[j] - cpu[j]), Math.abs(gpu[j + 1] - cpu[j + 1]), Math.abs(gpu[j + 2] - cpu[j + 2]));
@@ -240,9 +309,8 @@ class Engine {
         cases.push({ fixture: name, name: vname, mseL: Math.round(mseL * 1000) / 1000, mismatch: Math.round(mismatch * 1e5) / 1e5, maxDiff, pass: mseL <= 1 && mismatch <= 0.005 });
       }
     }
-    this.analysis.clear();
+    this.reset();
     this.renderer.clear();
-    this.plan = null;
     return {
       cases, compat, histogramMaxShareDiff: Math.round(histDiff * 1e5) / 1e5,
       pass: cases.every((c) => c.pass) && histDiff <= 0.01,

@@ -1,10 +1,13 @@
 <script lang="ts">
-  // Stage 1 debug page: not the Color Study interface. It drives the engine, shows
-  // the numbers behind each view and checks the stage acceptance targets on a device.
+  // Debug page for stages 1 and 2: not the Color Study interface. It drives the engine,
+  // shows the numbers behind each view and checks the stage acceptance targets on a device.
   import { onMount } from 'svelte';
   import { EngineClient } from '../src/client';
+  import { labToSrgb } from '../src/core/color';
+  import { colorInfo, compareColors, deltaE2000, hex, type ColorInfo } from '../src/core/colorinfo';
+  import { DEFAULT_PALETTE, type Swatch } from '../src/core/palette';
   import { DEFAULT_VIEW, type ViewState } from '../src/core/view';
-  import type { OpenResult, ParityReport, ViewResult } from '../src/types';
+  import type { OpenResult, PaletteResult, ParityReport, PickResult, ViewResult } from '../src/types';
 
   const VERSION = __ENGINE_VERSION__;
   const SAMPLES: Array<[string, string]> = [
@@ -20,6 +23,11 @@
   const FIXTURES = Object.fromEntries(['stilllife', 'landscape', 'flash', 'portrait'].map((n) => [n, new URL(`fixtures/${n}_1k.png`, location.href).href]));
   // Stage 1 targets from IMPLEMENTATION_PLAN, section 6.
   const TARGET = { previewMs: 1500, sliderMs: 50, stallMs: 100 };
+  // Stage 2 targets: palette ≤ 500 ms, Highlight slider ≤ 50 ms, marker = where the colour is.
+  const TARGET2 = { paletteMs: 500, highlightMs: 50, markerDE: 2 };
+  const SIZES = [1, 3, 5, 11];
+  const KINDS = [['dominant', 'Dominant'], ['range', 'Range'], ['accents', 'Accents']] as const;
+  type Kind = (typeof KINDS)[number][0];
 
   let canvas: HTMLCanvasElement;
   let box: HTMLDivElement;
@@ -34,6 +42,25 @@
   let stall = $state({ max: 0 });
   let parity: ParityReport | null = $state(null);
   let lastBlob: { blob: Blob; label: string } | null = null;
+
+  // Stage 2: pipette, palette, colour card, compare, Highlight.
+  let stageW = $state(0);
+  let stageH = $state(0);
+  let tool: 'pipette' | 'level' = $state('pipette');
+  let sampleSize = $state(5);
+  let picked: PickResult | null = $state(null);
+  let loupeAt: { x: number; y: number } | null = $state(null);
+  let lcanvas: HTMLCanvasElement | undefined = $state();
+  let current: { info: ColorInfo; from: string } | null = $state(null);
+  let compareA: ColorInfo | null = $state(null);
+  let palette: PaletteResult | null = $state(null);
+  let pparams = $state({ ...DEFAULT_PALETTE });
+  let pkind: Kind = $state('dominant');
+  let showMarkers = $state(true);
+  let markerCheck: { maxDE: number; n: number } | null = $state(null);
+  let hlSlider = $state({ n: 0, max: 0, samples: [] as number[] });
+  let pickMs = $state([] as number[]);
+  let copiedCode = $state('');
 
   // Main-thread stall monitor: a 16 ms timer that measures its own lateness.
   function jank() {
@@ -63,7 +90,9 @@
         __engineDev: {
           selftest: async () => { await runSelftest(); return $state.snapshot(parity); },
           open: async (url: string) => { await openSample(url, url); return report(); },
-          set: async (patch: Partial<ViewState>) => { Object.assign(vs, patch); await new Promise((r) => setTimeout(r, 30)); return report(); },
+          set: async (patch: Partial<ViewState>) => { Object.assign(vs, patch); await apply(); return report(); },
+          palette: async () => { await runPalette(); return { palette: $state.snapshot(palette), markers: $state.snapshot(markerCheck) }; },
+          pick: (u: number, v: number, size: number) => engine?.pickColor(u, v, size),
           report,
         },
       });
@@ -85,6 +114,11 @@
       opened = { ...r, label, bytes: blob.size, firstFrameMs: Math.round(performance.now() - t0), stallMs: stall.max };
       last = v;
       slider = { n: 0, max: 0, sum: 0, samples: [] };
+      hlSlider = { n: 0, max: 0, samples: [] };
+      palette = null;
+      markerCheck = null;
+      picked = null;
+      pickMs = [];
       drawHist();
     } catch (e) {
       error = String((e as Error)?.message ?? e);
@@ -115,7 +149,14 @@
     const r = await engine.setView($state.snapshot(vs));
     last = r;
     // Frames that had to re-run the analysis (new smoothing) are not slider frames.
-    if (fromSlider && r.roundTripMs != null && r.timings.analyzeMs === 0) {
+    if (vs.view === 'highlight') {
+      // A new target builds its ΔE histogram once; only tolerance/mode frames are slider frames.
+      if (!fromSlider || r.roundTripMs == null || r.timings.histMs > 0.5 || r.timings.analyzeMs > 0) { drawHist(); return; }
+      const s = hlSlider;
+      s.samples.push(r.roundTripMs);
+      if (s.samples.length > 200) s.samples.shift();
+      hlSlider = { n: s.n + 1, max: Math.max(s.max, r.roundTripMs), samples: s.samples };
+    } else if (fromSlider && r.roundTripMs != null && r.timings.analyzeMs === 0) {
       const s = slider;
       s.samples.push(r.roundTripMs);
       if (s.samples.length > 200) s.samples.shift();
@@ -139,11 +180,121 @@
   }
 
   async function tap(e: PointerEvent) {
-    if (!engine || vs.view !== 'values') return;
+    if (!engine) return;
+    if (tool === 'pipette') {
+      canvas.setPointerCapture(e.pointerId);
+      void pipette(e);
+      return;
+    }
+    if (vs.view !== 'values') return;
     const r = canvas.getBoundingClientRect();
     const lev = await engine.pick(e.clientX - r.left, e.clientY - r.top);
     vs.values.highlight = lev === vs.values.highlight ? -1 : lev;
   }
+
+  // Pipette: one request in flight, the latest pointer position wins.
+  let picking = false;
+  let nextPick: PointerEvent | null = null;
+  async function pipette(e: PointerEvent) {
+    if (!engine || !last) return;
+    if (picking) { nextPick = e; return; }
+    picking = true;
+    const r = canvas.getBoundingClientRect(), cx = e.clientX - r.left, cy = e.clientY - r.top;
+    const u = (cx / r.width - last.rect.x) / last.rect.w, v = (cy / r.height - last.rect.y) / last.rect.h;
+    const t0 = performance.now();
+    try {
+      const p = await engine.pickColor(u, v, sampleSize);
+      if (p) {
+        picked = p;
+        current = { info: p.info, from: `пипетка ${p.size}×${p.size} в (${p.x}, ${p.y})` };
+        loupeAt = { x: cx, y: cy };
+        pickMs = [...pickMs.slice(-199), Math.round((performance.now() - t0) * 10) / 10];
+        drawLoupe();
+      }
+    } finally {
+      picking = false;
+      const n = nextPick;
+      nextPick = null;
+      if (n) void pipette(n);
+    }
+  }
+
+  function move(e: PointerEvent) {
+    if (tool === 'pipette' && e.buttons) void pipette(e);
+  }
+
+  function release() {
+    loupeAt = null;
+  }
+
+  function drawLoupe() {
+    if (!lcanvas || !picked) return;
+    const n = Math.round(Math.sqrt(picked.patch.length / 4)), dpr = devicePixelRatio, css = 120;
+    lcanvas.width = css * dpr;
+    lcanvas.height = css * dpr;
+    const ctx = lcanvas.getContext('2d')!, tmp = new OffscreenCanvas(n, n);
+    tmp.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(picked.patch), n, n), 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(tmp, 0, 0, lcanvas.width, lcanvas.height);
+    // The sample square, centred on the middle pixel.
+    const cell = lcanvas.width / n, o = (n >> 1) - (picked.size >> 1);
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeStyle = '#000';
+    ctx.strokeRect(o * cell, o * cell, picked.size * cell, picked.size * cell);
+    ctx.lineWidth = dpr;
+    ctx.strokeStyle = '#fff';
+    ctx.strokeRect(o * cell + dpr, o * cell + dpr, picked.size * cell - 2 * dpr, picked.size * cell - 2 * dpr);
+  }
+
+  async function runPalette() {
+    if (!engine || !opened) return;
+    busy = 'Извлекаю палитру…';
+    try {
+      palette = await engine.palette($state.snapshot(pparams));
+      // Marker check: tap every marker with its pipette size, compare with the swatch.
+      let maxDE = 0, n = 0;
+      for (const s of [...palette.dominant, ...palette.range, ...palette.accents]) {
+        const p = await engine.pickColor(s.marker.x, s.marker.y, s.marker.size);
+        if (!p) continue;
+        maxDE = Math.max(maxDE, deltaE2000(p.info.lab, s.lab));
+        n++;
+      }
+      markerCheck = { maxDE: Math.round(maxDE * 100) / 100, n };
+    } catch (e) {
+      error = String((e as Error)?.message ?? e);
+    } finally {
+      busy = '';
+    }
+  }
+
+  function selectSwatch(s: Swatch, label: string) {
+    current = { info: colorInfo(s.rgb), from: `${label}, доля ${(s.share * 100).toFixed(1)}%, маркер ${s.marker.size} px` };
+  }
+
+  function findOnPhoto(info: ColorInfo) {
+    vs.highlight = { ...vs.highlight, target: [...info.lab] as [number, number, number] };
+    vs.view = 'highlight';
+  }
+
+  async function copyCode(k: string, v: string) {
+    try {
+      await navigator.clipboard.writeText(v);
+      copiedCode = k;
+      setTimeout(() => (copiedCode = ''), 1200);
+    } catch {}
+  }
+
+  const swatches: Swatch[] = $derived(palette ? palette[pkind] : []);
+  /** Marker and strip positions in stage CSS px. */
+  const overlay = $derived.by(() => {
+    if (!last || !palette || !showMarkers || !swatches.length) return [];
+    const r = last.rect, n = swatches.length, sw = Math.min(40, (stageW - 16) / n), x0 = (stageW - sw * n) / 2;
+    return swatches.map((s, i) => ({
+      s, i,
+      mx: (r.x + s.marker.x * r.w) * stageW, my: (r.y + s.marker.y * r.h) * stageH,
+      sx: x0 + i * sw, sw, sy: stageH - sw - 8,
+    }));
+  });
 
   function p95(a: number[]) {
     if (!a.length) return 0;
@@ -159,16 +310,18 @@
     const ctx = hcanvas.getContext('2d')!;
     ctx.scale(dpr, dpr);
     const css = getComputedStyle(document.documentElement);
-    const hist = last.hist, max = Math.max(...hist.map((v) => Math.sqrt(v))) || 1;
+    const hist = last.hist, nb = hist.length || 1, max = Math.max(...hist.map((v) => Math.sqrt(v))) || 1;
     ctx.fillStyle = css.getPropertyValue('--muted');
-    for (let v = 0; v < 256; v++) {
+    for (let v = 0; v < nb; v++) {
       const bh = (Math.sqrt(hist[v]) / max) * (h - 4);
-      ctx.fillRect((v / 256) * w, h - bh, w / 256 + 0.5, bh);
+      ctx.fillRect((v / nb) * w, h - bh, w / nb + 0.5, bh);
     }
-    const marks = last.stats.values?.thresholds ?? last.stats.notan?.thresholds
-      ?? (last.stats.temperature ? [last.stats.temperature.neutral + 128] : []);
+    // Marks as fractions of the axis: tone thresholds, neutral warmth, or the ΔE tolerance.
+    const marks = last.stats.highlight ? [vs.highlight.tolerance / nb]
+      : (last.stats.values?.thresholds ?? last.stats.notan?.thresholds
+        ?? (last.stats.temperature ? [last.stats.temperature.neutral + 128] : [])).map((t) => (t + 0.5) / 256);
     ctx.fillStyle = css.getPropertyValue('--accent');
-    for (const t of marks) ctx.fillRect(((t + 0.5) / 256) * w - 1, 0, 2, h);
+    for (const t of marks) ctx.fillRect(t * w - 1, 0, 2, h);
   }
 
   async function runSelftest() {
@@ -189,7 +342,7 @@
 
   function report() {
     return {
-      schema: 'vishar-stage1-report/1',
+      schema: 'vishar-stage2-report/1',
       build: VERSION,
       at: new Date().toISOString(),
       userAgent: navigator.userAgent,
@@ -202,6 +355,18 @@
       slider: { frames: slider.n, maxMs: slider.max, p95Ms: p95(slider.samples), meanMs: slider.n ? Math.round((slider.sum / slider.n) * 10) / 10 : 0 },
       maxMainThreadStallMs: stall.max,
       parity,
+      stage2: {
+        palette: palette ? {
+          totalMs: palette.totalMs, readMs: palette.readMs, gridMs: palette.gridMs, extractMs: palette.ms, params: $state.snapshot(pparams),
+          counts: { dominant: palette.dominant.length, range: palette.range.length, accents: palette.accents.length },
+          dominant: palette.dominant.map((s) => ({ hex: s.hex, share: s.share, markerDE: s.markerDE, size: s.marker.size })),
+          accents: palette.accents.map((s) => s.hex),
+        } : null,
+        markers: markerCheck,
+        highlightSlider: { frames: hlSlider.n, maxMs: hlSlider.max, p95Ms: p95(hlSlider.samples) },
+        highlightShare: last?.stats.highlight?.share ?? null,
+        pipette: { picks: pickMs.length, p95Ms: p95(pickMs), lastMs: picked?.ms ?? null },
+      },
     };
   }
 
@@ -219,9 +384,9 @@
 
   async function shareReport() {
     const text = JSON.stringify(report(), null, 1);
-    const file = new File([text], `vishar-stage1-${Date.now()}.json`, { type: 'application/json' });
+    const file = new File([text], `vishar-stage2-${Date.now()}.json`, { type: 'application/json' });
     try {
-      if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: 'Vishar Stage 1' });
+      if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: 'Vishar Stage 2' });
       else await navigator.share({ text });
     } catch {}
   }
@@ -241,7 +406,7 @@
 
 <main>
   <header>
-    <h1>Vishar Engine · Stage 1</h1>
+    <h1>Vishar Engine · Stage 2</h1>
     <p class="sub">Отладочная страница ядра, не интерфейс приложения · {VERSION}</p>
   </header>
 
@@ -257,20 +422,54 @@
     </div>
   </section>
 
-  <div class="stage" bind:this={box}>
-    <canvas bind:this={canvas} onpointerdown={tap}></canvas>
+  <div class="stage" bind:this={box} bind:clientWidth={stageW} bind:clientHeight={stageH}>
+    <canvas bind:this={canvas} onpointerdown={tap} onpointermove={move} onpointerup={release} onpointercancel={release}></canvas>
+    {#if overlay.length}
+      <svg class="overlay" width={stageW} height={stageH}>
+        {#each overlay as m}
+          <line x1={m.mx} y1={m.my} x2={m.sx + m.sw / 2} y2={m.sy} />
+        {/each}
+        {#each overlay as m}
+          <circle cx={m.mx} cy={m.my} r="9" fill={m.s.hex} />
+          <text x={m.mx} y={m.my + 4} fill={m.s.lab[0] > 55 ? '#000' : '#fff'}>{m.i + 1}</text>
+          <rect class="sw" x={m.sx} y={m.sy} width={m.sw} height={m.sw} fill={m.s.hex}
+            role="button" tabindex="-1" onpointerdown={(e) => { e.stopPropagation(); selectSwatch(m.s, `${pkind} ${m.i + 1}`); }} />
+        {/each}
+      </svg>
+    {/if}
+    {#if loupeAt && picked}
+      <div class="loupe" style="left: {loupeAt.x - 60}px; top: {Math.max(4, loupeAt.y - 150)}px">
+        <canvas bind:this={lcanvas}></canvas>
+        <span style="background: {picked.info.codes.HEX}"></span>
+      </div>
+    {/if}
     {#if !opened && !busy}<p class="hint">Открой фото или образец</p>{/if}
     {#if busy}<p class="hint">{busy}</p>{/if}
   </div>
   {#if error}<p class="error">{error}</p>{/if}
 
   <nav class="tabs">
-    {#each [['original', 'Оригинал'], ['values', 'Values'], ['notan', 'Notan'], ['temperature', 'Temperature']] as [v, label]}
+    {#each [['original', 'Оригинал'], ['values', 'Values'], ['notan', 'Notan'], ['temperature', 'Temp'], ['highlight', 'Highlight']] as [v, label]}
       <button class:active={vs.view === v} onclick={() => setView(v as ViewState['view'])}>{label}</button>
     {/each}
   </nav>
 
   <section class="card controls">
+    <div class="row">
+      <span>Тап по фото</span>
+      <div class="seg">
+        <button class:active={tool === 'pipette'} onclick={() => (tool = 'pipette')}>пипетка</button>
+        <button class:active={tool === 'level'} onclick={() => (tool = 'level')}>уровень Values</button>
+      </div>
+    </div>
+    {#if tool === 'pipette'}
+      <div class="row">
+        <span>Размер пробы</span>
+        <div class="seg">
+          {#each SIZES as n}<button class:active={sampleSize === n} onclick={() => (sampleSize = n)}>{n === 1 ? '1 px' : `${n}×${n}`}</button>{/each}
+        </div>
+      </div>
+    {/if}
     <div class="row">
       <span>Сглаживание</span>
       <div class="seg">
@@ -345,6 +544,24 @@
         </div>
       </div>
       <label class="row">Баланс <b>{vs.temperature.balance}</b><input type="range" min="-30" max="30" bind:value={vs.temperature.balance} /></label>
+    {:else if vs.view === 'highlight'}
+      {#if vs.highlight.target}
+        <div class="row">
+          <span>Цвет</span>
+          <span class="dot" style="background: {hex(labToSrgb(...vs.highlight.target))}"></span>
+          <span class="muted">L* {vs.highlight.target[0].toFixed(1)}, a* {vs.highlight.target[1].toFixed(1)}, b* {vs.highlight.target[2].toFixed(1)}</span>
+        </div>
+      {:else}
+        <p class="muted">Выбери цвет пипеткой или в палитре и нажми «Найти на фото».</p>
+      {/if}
+      <label class="row">Допуск ΔE2000 <b>{vs.highlight.tolerance}</b><input type="range" min="0" max="50" step="0.5" bind:value={vs.highlight.tolerance} /></label>
+      <div class="row">
+        <span>Вид</span>
+        <div class="seg">
+          <button class:active={vs.highlight.mode === 'highlight'} onclick={() => (vs.highlight.mode = 'highlight')}>подсветка</button>
+          <button class:active={vs.highlight.mode === 'outline'} onclick={() => (vs.highlight.mode = 'outline')}>контур</button>
+        </div>
+      </div>
     {/if}
 
     {#if vs.view !== 'original'}<canvas class="hist" bind:this={hcanvas}></canvas>{/if}
@@ -358,8 +575,92 @@
     {#if last?.stats.notan}
       <p class="muted">Порог: {last.stats.notan.modeUsed === 'otsu' ? 'Otsu' : 'медиана'} · тёмного {Math.round(last.stats.notan.share[0] * 100)}%</p>
     {/if}
+    {#if last?.stats.highlight && vs.highlight.target}
+      <p class="muted">В допуске {(last.stats.highlight.share * 100).toFixed(1)}% фото · гистограмма ΔE до цвета 0…100</p>
+    {/if}
     {#if last?.stats.temperature}
       <p class="muted">Тёплого {Math.round(last.stats.temperature.warmShare * 100)}% · нейтраль {last.stats.temperature.neutral.toFixed(1)} · разброс {last.stats.temperature.spread}</p>
+    {/if}
+  </section>
+
+  <section class="card controls">
+    <h2>Палитра</h2>
+    <label class="row">Dominant <b>{pparams.dominant}</b><input type="range" min="3" max="12" bind:value={pparams.dominant} /></label>
+    <label class="row">Range <b>{pparams.range}</b><input type="range" min="3" max="12" bind:value={pparams.range} /></label>
+    <label class="row">Accents <b>{pparams.accents}</b><input type="range" min="0" max="12" bind:value={pparams.accents} /></label>
+    <label class="row">Слияние ΔE <b>{pparams.mergeDE}</b><input type="range" min="0" max="20" bind:value={pparams.mergeDE} /></label>
+    <div class="row">
+      <button class="primary" onclick={runPalette} disabled={!opened || !!busy}>Извлечь палитру</button>
+      <label class="check"><input type="checkbox" bind:checked={showMarkers} /> маркеры на фото</label>
+    </div>
+    {#if palette}
+      <div class="seg">
+        {#each KINDS as [k, label]}<button class:active={pkind === k} onclick={() => (pkind = k)}>{label} · {palette[k].length}</button>{/each}
+      </div>
+      <div class="swatches">
+        {#each swatches as s, i}
+          <button style="background: {s.hex}; color: {s.lab[0] > 55 ? '#000' : '#fff'}" onclick={() => selectSwatch(s, `${pkind} ${i + 1}`)}>
+            {i + 1}<small>{pkind === 'range' ? `L* ${Math.round(s.lab[0])}` : `${(s.share * 100).toFixed(1)}%`}</small>
+          </button>
+        {/each}
+      </div>
+      {#if !swatches.length}<p class="muted">Акцентов нет: насыщенных цветов вдали от основных не нашлось.</p>{/if}
+      <p class="muted">Всего {palette.totalMs} мс: чтение пикселей {palette.readMs}, сетка {palette.gridMs}, извлечение {palette.ms}. Тап по образцу открывает карточку цвета.</p>
+    {/if}
+  </section>
+
+  {#if current}
+    {@const c = current.info}
+    <section class="card">
+      <h2>Цвет</h2>
+      <div class="colorhead">
+        <span class="big" style="background: {c.codes.HEX}"></span>
+        <div>
+          <b>{c.name}</b> · {c.temperature.label}
+          <p class="muted">{current.from}</p>
+          <p class="muted">Value (L*) {c.value} · тон {c.hue}° · хрома {c.chroma} · насыщенность {c.saturation}% · тепло {c.temperature.warmth}</p>
+        </div>
+      </div>
+      <div class="codes">
+        {#each Object.entries(c.codes) as [k, v]}
+          <button onclick={() => copyCode(k, v)}><span>{k}</span>{copiedCode === k ? 'скопировано' : v}</button>
+        {/each}
+      </div>
+      <div class="row">
+        <span class="dot" style="background: {hex(c.complementary)}"></span>
+        <span class="muted">Дополнительный {hex(c.complementary)}</span>
+      </div>
+      <div class="row">
+        <button onclick={() => (compareA = c)}>Запомнить как A</button>
+        <button class="primary" onclick={() => findOnPhoto(c)}>Найти на фото</button>
+      </div>
+      {#if compareA}
+        {@const d = compareColors(compareA.rgb, c.rgb)}
+        <div class="row">
+          <span class="dot" style="background: {compareA.codes.HEX}"></span> A → B <span class="dot" style="background: {c.codes.HEX}"></span>
+          <span class="muted">ΔE2000 {d.dE2000} · Value {d.dValue > 0 ? '+' : ''}{d.dValue} · тепло {d.dWarmth > 0 ? '+' : ''}{d.dWarmth} · тон {d.dHue > 0 ? '+' : ''}{d.dHue}° · хрома {d.dChroma > 0 ? '+' : ''}{d.dChroma}</span>
+        </div>
+      {/if}
+    </section>
+  {/if}
+
+  <section class="card">
+    <h2>Цели этапа 2</h2>
+    {#if opened}
+      <ul class="targets">
+        <li class={ok(!!palette && palette.totalMs <= TARGET2.paletteMs)}>
+          Палитра: {palette ? `${palette.totalMs} мс (Dominant ${palette.dominant.length}, Range ${palette.range.length}, Accents ${palette.accents.length})` : 'нажми «Извлечь палитру»'} (цель ≤ {TARGET2.paletteMs})
+        </li>
+        <li class={ok(!!markerCheck && markerCheck.maxDE <= TARGET2.markerDE)}>
+          Маркеры: {markerCheck ? `пипетка в ${markerCheck.n} маркерах даёт цвет образца, макс ΔE ${markerCheck.maxDE}` : 'проверка идёт после извлечения палитры'} (цель ≤ {TARGET2.markerDE})
+        </li>
+        <li class={ok(hlSlider.n > 0 && p95(hlSlider.samples) <= TARGET2.highlightMs)}>
+          Highlight: {hlSlider.n ? `p95 ${p95(hlSlider.samples)} мс, макс ${hlSlider.max} мс, кадров ${hlSlider.n}` : 'выбери цвет, «Найти на фото» и подвигай допуск'} (цель ≤ {TARGET2.highlightMs})
+        </li>
+      </ul>
+      {#if pickMs.length}<p class="muted">Пипетка: {pickMs.length} проб, p95 {p95(pickMs)} мс туда-обратно.</p>{/if}
+    {:else}
+      <p class="muted">Открой фото.</p>
     {/if}
   </section>
 
@@ -393,7 +694,7 @@
 
   <section class="card">
     <h2>Сверка GPU и CPU</h2>
-    <p class="muted">Рендерит 11 режимов на 4 эталонных фото на GPU и на CPU и сравнивает пиксели. Плюс режим «как в оригинале» против порогов Color Study.</p>
+    <p class="muted">Рендерит 14 режимов на 4 эталонных фото на GPU и на CPU и сравнивает пиксели. Плюс режим «как в оригинале» против порогов Color Study.</p>
     <button class="primary" onclick={runSelftest} disabled={!engine || !!busy}>Запустить сверку</button>
     {#if parity}
       <p class={ok(parity.pass)}>{parity.pass ? 'Совпадает' : 'Есть расхождения'} · {parity.cases.filter((c) => c.pass).length}/{parity.cases.length} · {parity.ms} мс · гистограммы ±{(parity.histogramMaxShareDiff * 100).toFixed(2)}%</p>
@@ -490,7 +791,25 @@
   button:disabled { opacity: 0.5; }
   .chip { font-size: 13px; padding: 4px 9px; }
   .primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  .tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 10px; }
+  .tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-top: 10px; }
+  .tabs button { font-size: 13px; }
+  .overlay { position: absolute; inset: 0; pointer-events: none; }
+  .overlay line { stroke: #fff; stroke-width: 1.5; opacity: 0.85; filter: drop-shadow(0 0 1px #000); }
+  .overlay circle { stroke: #fff; stroke-width: 2; filter: drop-shadow(0 0 1px #000); }
+  .overlay text { font-size: 11px; font-weight: 700; text-anchor: middle; }
+  .overlay .sw { pointer-events: auto; stroke: #fff; stroke-width: 1.5; cursor: pointer; }
+  .loupe { position: absolute; width: 120px; height: 120px; border-radius: 50%; overflow: hidden; border: 3px solid #fff; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5); pointer-events: none; }
+  .loupe canvas { width: 120px; height: 120px; display: block; }
+  .loupe span { position: absolute; left: 0; right: 0; bottom: 0; height: 16px; }
+  .swatches { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .swatches button { width: 54px; height: 54px; padding: 2px; display: flex; flex-direction: column; justify-content: space-between; align-items: flex-start; font-weight: 700; }
+  .swatches small { font-weight: 400; font-size: 10px; }
+  .colorhead { display: flex; gap: 12px; align-items: flex-start; }
+  .big { width: 64px; height: 64px; border-radius: 10px; border: 1px solid var(--line); flex: none; }
+  .dot { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line); display: inline-block; flex: none; }
+  .codes { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px; margin: 8px 0; }
+  .codes button { text-align: left; font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+  .codes span { display: block; color: var(--muted); font-family: -apple-system, sans-serif; font-size: 11px; }
   .tabs button, .seg button { padding: 6px 4px; }
   .active { background: var(--fg); color: var(--bg); border-color: var(--fg); }
   .controls .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; flex-wrap: wrap; }

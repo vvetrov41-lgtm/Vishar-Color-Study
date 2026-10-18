@@ -3,7 +3,8 @@
 
 import * as Comlink from 'comlink';
 import type { ViewState } from './core/view';
-import type { Caps, OpenOptions, OpenResult, ParityReport, ViewResult } from './types';
+import type { PaletteParams } from './core/palette';
+import type { Caps, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, ViewResult } from './types';
 import type { EngineApi } from './worker/engine.worker';
 
 type Resolver = { ok: (r: ViewResult) => void; fail: (e: unknown) => void };
@@ -76,6 +77,15 @@ export class EngineClient {
 
   pick(x: number, y: number): Promise<number> {
     return this.api.pick(x, y);
+  }
+
+  palette(params?: PaletteParams): Promise<PaletteResult> {
+    return this.api.palette(params);
+  }
+
+  /** Pipette at (u, v), 0..1 of the working copy. */
+  pickColor(u: number, v: number, size: number): Promise<PickResult | null> {
+    return this.api.pickColor(u, v, size);
   }
 
   exportWork(): Promise<Blob> {
