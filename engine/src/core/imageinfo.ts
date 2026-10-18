@@ -14,20 +14,21 @@ const u16be = (d: Uint8Array, i: number) => (d[i] << 8) | d[i + 1];
 const u32be = (d: Uint8Array, i: number) => ((d[i] << 24) >>> 0) + (d[i + 1] << 16) + (d[i + 2] << 8) + d[i + 3];
 const ascii = (d: Uint8Array, i: number, n: number) => String.fromCharCode(...d.subarray(i, i + n));
 
+/** EXIF Orientation tag, or 0 when the APP1 segment is not EXIF or has no such tag. */
 function exifOrientation(d: Uint8Array, start: number, len: number): number {
-  if (ascii(d, start, 4) !== 'Exif') return 1;
+  if (ascii(d, start, 4) !== 'Exif') return 0;
   const t = start + 6, le = d[t] === 0x49;
   const r16 = (i: number) => (le ? d[i] | (d[i + 1] << 8) : u16be(d, i));
   const r32 = (i: number) => (le ? (d[i] | (d[i + 1] << 8) | (d[i + 2] << 16)) + d[i + 3] * 0x1000000 : u32be(d, i));
   const ifd = t + r32(t + 4);
-  if (ifd + 2 > start + len) return 1;
+  if (ifd + 2 > start + len) return 0;
   const n = r16(ifd);
   for (let k = 0; k < n; k++) {
     const e = ifd + 2 + k * 12;
     if (e + 12 > start + len) break;
     if (r16(e) === 0x0112) return r16(e + 8);
   }
-  return 1;
+  return 0;
 }
 
 function jpeg(d: Uint8Array): ImageInfo | null {
@@ -38,7 +39,8 @@ function jpeg(d: Uint8Array): ImageInfo | null {
     if (m === 0xff) { i++; continue; }
     if (m === 0xd8 || m === 0x01 || (m >= 0xd0 && m <= 0xd7)) { i += 2; continue; }
     const len = u16be(d, i + 2);
-    if (m === 0xe1) orient = exifOrientation(d, i + 4, len - 2);
+    // An XMP APP1 may follow the EXIF one; it must not reset the orientation.
+    if (m === 0xe1) orient = exifOrientation(d, i + 4, len - 2) || orient;
     if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
       const h = u16be(d, i + 5), w = u16be(d, i + 7);
       return orient >= 5 ? { format: 'jpeg', width: h, height: w } : { format: 'jpeg', width: w, height: h };

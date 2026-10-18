@@ -120,6 +120,14 @@ describe('image header', () => {
     expect(parseImageInfo(sample('synth_48mp.jpg'))).toMatchObject({ width: 8064, height: 6048 });
     expect(parseImageInfo(sample('synth_12mp.heic'))).toMatchObject({ format: 'heic', width: 4032, height: 3024 });
   });
+  it('keeps EXIF orientation when an XMP APP1 follows', () => {
+    // SOI, APP1 Exif (big-endian TIFF, one IFD entry: Orientation = 6), APP1 XMP, SOF0 64×32.
+    const exif = [0x45, 0x78, 0x69, 0x66, 0, 0, 0x4d, 0x4d, 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0];
+    const xmp = [...'http://ns.adobe.com/xap/1.0/\0'].map((c) => c.charCodeAt(0));
+    const seg = (m: number, p: number[]) => [0xff, m, (p.length + 2) >> 8, (p.length + 2) & 255, ...p];
+    const jpeg = new Uint8Array([0xff, 0xd8, ...seg(0xe1, exif), ...seg(0xe1, xmp), ...seg(0xc0, [8, 0, 32, 0, 64, 3]), 0, 0, 0, 0]);
+    expect(parseImageInfo(jpeg)).toMatchObject({ format: 'jpeg', width: 32, height: 64 });
+  });
   it('fits the long side without upscaling', () => {
     expect(fitLongSide(6048, 8064, 1600)).toEqual([1200, 1600]);
     expect(fitLongSide(800, 600, 1600)).toEqual([800, 600]);

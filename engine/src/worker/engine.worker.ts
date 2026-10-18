@@ -80,21 +80,26 @@ class Engine {
         warnings.push(`decode-to-size ${tw}×${th}: ${(e as Error).message}`);
       }
       // Fallback: one full decode, downscale on a canvas, free the full frame at once.
-      if (sizeFrom === 'header' && w * h * 4 > budget) {
-        warnings.push(`полное декодирование ${w}×${h} не влезает в бюджет ${opts.budgetMB ?? 512} МБ, пропускаю`);
+      // Unknown source size means the decode cannot be budgeted: skip it and go down the ladder.
+      if (sizeFrom === 'probe' || w * h * 4 > budget) {
+        warnings.push(sizeFrom === 'probe'
+          ? 'размер исходника неизвестен, полное декодирование пропускаю'
+          : `полное декодирование ${w}×${h} не влезает в бюджет ${opts.budgetMB ?? 512} МБ, пропускаю`);
         continue;
       }
+      let full: ImageBitmap | null = null;
       try {
-        const full = await createImageBitmap(blob, { imageOrientation: 'from-image', premultiplyAlpha: 'none' });
+        full = await createImageBitmap(blob, { imageOrientation: 'from-image', premultiplyAlpha: 'none' });
         const c = new OffscreenCanvas(tw, th), ctx = c.getContext('2d')!;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(full, 0, 0, tw, th);
-        full.close();
         bitmap = c.transferToImageBitmap();
         method = 'full-decode+downscale';
         break;
       } catch (e) {
         warnings.push(`полное декодирование: ${(e as Error).message}`);
+      } finally {
+        full?.close();
       }
     }
     if (!bitmap) throw new Error('не удалось декодировать фото: ' + warnings.join('; '));
