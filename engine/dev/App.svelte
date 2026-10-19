@@ -112,7 +112,8 @@
     }).catch((e) => (error = String(e?.message ?? e)));
   });
 
-  async function openBlob(blob: Blob, label: string) {
+  /** keep: re-open of the same photo after the selftest, measurements made on it stay. */
+  async function openBlob(blob: Blob, label: string, keep = false) {
     if (!engine) return;
     error = '';
     busy = `Открываю ${label}…`;
@@ -126,6 +127,9 @@
       await new Promise((res) => setTimeout(res, 50));
       opened = { ...r, label, bytes: blob.size, firstFrameMs: Math.round(performance.now() - t0), stallMs: stall.max };
       last = v;
+      logCompute(v);
+      drawHist();
+      if (keep) return;
       slider = { n: 0, max: 0, sum: 0, samples: [] };
       hlSlider = { n: 0, max: 0, samples: [] };
       palette = null;
@@ -135,12 +139,17 @@
       computeLog = {};
       drawSlider = { n: 0, max: 0, samples: [] };
       svgInfo = null;
-      drawHist();
     } catch (e) {
       error = String((e as Error)?.message ?? e);
     } finally {
       busy = '';
     }
+  }
+
+  function logCompute(r: ViewResult) {
+    if ((vs.view !== 'simplify' && vs.view !== 'drawing') || !(r.timings.computeMs > 0)) return;
+    const key = vs.view === 'simplify' ? vs.simplify.mode : vs.drawing.mode;
+    computeLog[key] = { ms: r.timings.computeMs, algoMs: r.stats.simplify?.ms.total, work: `${r.work.width}×${r.work.height}`, regions: r.stats.simplify?.regions, colors: r.stats.simplify?.colors };
   }
 
   async function openSample(url: string, label: string) {
@@ -167,10 +176,7 @@
     progress = 0;
     // Frames that had to re-run the analysis (new smoothing) are not slider frames.
     if (vs.view === 'simplify' || vs.view === 'drawing') {
-      if (r.timings.computeMs > 0) {
-        const key = vs.view === 'simplify' ? vs.simplify.mode : vs.drawing.mode;
-        computeLog[key] = { ms: r.timings.computeMs, algoMs: r.stats.simplify?.ms.total, work: `${r.work.width}×${r.work.height}`, regions: r.stats.simplify?.regions, colors: r.stats.simplify?.colors };
-      }
+      logCompute(r);
       // Line slider frames only: same style, Stroke and smoothing, a new Line value.
       const base = JSON.stringify([vs.smoothing, vs.drawing.mode, vs.drawing.stroke, vs.drawing.invert]);
       const lineOnly = vs.view === 'drawing' && base === lastDraw.base && vs.drawing.line !== lastDraw.line;
@@ -371,10 +377,14 @@
     busy = 'Сверяю GPU с CPU-эталоном на 4 фото…';
     error = '';
     try {
+      const before = opened;
       parity = await engine.selftest(FIXTURES);
       opened = null;
       last = null;
-      if (lastBlob) await openBlob(lastBlob.blob, lastBlob.label);
+      if (lastBlob) await openBlob(lastBlob.blob, lastBlob.label, true);
+      // The first-open timings belong to the original open, not the re-open after the test.
+      const now = opened as typeof before;
+      if (now && before) opened = { ...now, firstFrameMs: before.firstFrameMs, stallMs: before.stallMs };
     } catch (e) {
       error = String((e as Error)?.message ?? e);
     } finally {
