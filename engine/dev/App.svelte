@@ -221,7 +221,8 @@
 
   async function tap(e: PointerEvent) {
     if (!engine) return;
-    if (tool === 'pipette') {
+    // In Highlight a tap (or drag) on the photo picks the colour to find.
+    if (tool === 'pipette' || vs.view === 'highlight') {
       canvas.setPointerCapture(e.pointerId);
       pressed = true;
       void pipette(e);
@@ -250,6 +251,7 @@
       if (p) {
         picked = p;
         current = { info: p.info, from: `пипетка ${p.size}×${p.size} в (${p.x}, ${p.y})` };
+        if (vs.view === 'highlight') vs.highlight = { ...vs.highlight, target: [...p.info.lab] as [number, number, number] };
         if (pressed) loupeAt = { x: cx, y: cy };
         pickMs = [...pickMs.slice(-199), Math.round((performance.now() - t0) * 10) / 10];
       }
@@ -262,7 +264,7 @@
   }
 
   function move(e: PointerEvent) {
-    if (tool === 'pipette' && e.buttons) void pipette(e);
+    if ((tool === 'pipette' || vs.view === 'highlight') && e.buttons) void pipette(e);
   }
 
   function release() {
@@ -647,8 +649,9 @@
           <span class="dot" style="background: {hex(labToSrgb(...vs.highlight.target))}"></span>
           <span class="muted">L* {vs.highlight.target[0].toFixed(1)}, a* {vs.highlight.target[1].toFixed(1)}, b* {vs.highlight.target[2].toFixed(1)}</span>
         </div>
+        <p class="muted">Тапни по фото, чтобы выбрать другой цвет.</p>
       {:else}
-        <p class="muted">Выбери цвет пипеткой или в палитре и нажми «Найти на фото».</p>
+        <p class="muted">Тапни по фото: подсветятся все места похожего цвета. Допуск задаёт, насколько похожего.</p>
       {/if}
       <label class="row">Допуск ΔE2000 <b>{vs.highlight.tolerance}</b><input type="range" min="0" max="50" step="0.5" bind:value={vs.highlight.tolerance} /></label>
       <div class="row">
