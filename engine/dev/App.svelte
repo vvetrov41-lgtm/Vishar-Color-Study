@@ -65,7 +65,17 @@
   type Section = (typeof TABS)[number][0];
   let section = $state<Section>('original');
   // A tap on the photo: picks the level in Values, the target in Highlight, a colour elsewhere.
-  const tool: 'pipette' | 'level' = $derived(section === 'values' ? 'level' : 'pipette');
+  // Only where a tap means something: a colour on the original or palette, the target in Highlight,
+  // the level in Values, the pigment in Тату → Пигменты. Elsewhere a tap does nothing.
+  const tool: 'pipette' | 'level' | 'pigment' | 'none' = $derived(
+    section === 'original' || section === 'palette' || section === 'highlight' ? 'pipette'
+      : section === 'values' ? 'level'
+      : section === 'tattoo' && vs.tattoo.tool === 'pigments' ? 'pigment' : 'none');
+
+  /** Shows one pigment (or tone, −2 = skin) on the image; the same again shows all. */
+  function focusPigment(k: number) {
+    vs.tattoo.pigments.focus = vs.tattoo.pigments.focus === k ? -1 : k;
+  }
   // Explanation sheet opened by an «i» next to a control.
   let hint: string | null = $state(null);
   let sampleSize = $state(5);
@@ -271,13 +281,20 @@
       return;
     }
     // In Highlight a tap (or drag) on the photo picks the colour to find.
-    if (tool === 'pipette' || vs.view === 'highlight') {
+    if (tool === 'pipette') {
       canvas.setPointerCapture(e.pointerId);
       pressed = true;
       void pipette(e);
       return;
     }
-    if (vs.view !== 'values') return;
+    if (tool === 'pigment' && last) {
+      const r = canvas.getBoundingClientRect();
+      const u = ((e.clientX - r.left) / r.width - last.rect.x) / last.rect.w, v = ((e.clientY - r.top) / r.height - last.rect.y) / last.rect.h;
+      const k = await engine.pickPigment(u, v);
+      if (k !== null) focusPigment(k);
+      return;
+    }
+    if (tool !== 'level') return;
     const r = canvas.getBoundingClientRect();
     const lev = await engine.pick(e.clientX - r.left, e.clientY - r.top);
     vs.values.highlight = lev === vs.values.highlight ? -1 : lev;
@@ -313,7 +330,7 @@
   }
 
   function move(e: PointerEvent) {
-    if ((tool === 'pipette' || vs.view === 'highlight') && e.buttons) void pipette(e);
+    if (tool === 'pipette' && e.buttons) void pipette(e);
   }
 
   function release() {
@@ -752,7 +769,7 @@
     {:else if vs.view === 'tattoo'}
       {@const t = vs.tattoo}
       <div class="seg wrap">
-        {#each TOOLS as [k, label]}<button class:active={t.tool === k} onclick={() => (vs.tattoo.tool = k)}>{label}</button>{/each}
+        {#each TOOLS as [k, label]}<button class:active={t.tool === k} onclick={() => { vs.tattoo.tool = k; vs.tattoo.pigments.focus = -1; }}>{label}</button>{/each}
         {@render i('tat.tool')}
       </div>
       {#if t.tool !== 'skin' && t.skin.use}
@@ -774,8 +791,8 @@
         <div class="row">
           <span>Режим {@render i('pig.mode')}</span>
           <div class="seg">
-            <button class:active={pg.mode === 'color'} onclick={() => (vs.tattoo.pigments.mode = 'color')}>Цвет</button>
-            <button class:active={pg.mode === 'bg'} onclick={() => (vs.tattoo.pigments.mode = 'bg')}>Black & Grey</button>
+            <button class:active={pg.mode === 'color'} onclick={() => (vs.tattoo.pigments = { ...vs.tattoo.pigments, mode: 'color', focus: -1 })}>Цвет</button>
+            <button class:active={pg.mode === 'bg'} onclick={() => (vs.tattoo.pigments = { ...vs.tattoo.pigments, mode: 'bg', focus: -1 })}>Black & Grey</button>
           </div>
         </div>
         {#if pg.mode === 'color'}
@@ -785,7 +802,7 @@
               <option value="">все бренды</option>
             </select>
           </label>
-          <label class="row"><span>Красок {@render i('pig.max')}</span> <b>{pg.maxInks}</b><input type="range" min="1" max="10" bind:value={vs.tattoo.pigments.maxInks} /></label>
+          <label class="row"><span>Красок {@render i('pig.max')}</span> <b>{pg.maxInks}</b><input type="range" min="1" max="16" bind:value={vs.tattoo.pigments.maxInks} /></label>
           <label class="row"><span>Далеко, ΔE {@render i('pig.far')}</span> <b>{pg.farDE}</b><input type="range" min="3" max="25" bind:value={vs.tattoo.pigments.farDE} /></label>
         {:else}
           <label class="row"><span>Линейка {@render i('pig.series')}</span>
@@ -801,7 +818,17 @@
             <label class="row"><span>{pg.series >= 0 ? GREY_SERIES[pg.series].names[k] : `Тон ${k + 1}`} {#if k === 0}{@render i('pig.tone')}{/if}</span> <b>{L}</b><input type="range" min="0" max="95" bind:value={vs.tattoo.pigments.tonesL[k]} /></label>
           {/each}
         {/if}
-        <label class="row"><span>Детали {@render i('simp.details')}</span> <b>{pg.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.pigments.details} /></label>
+        <div class="row">
+          <span>Основа {@render i('pig.source')}</span>
+          <div class="seg">
+            <button class:active={pg.source === 'photo'} onclick={() => (vs.tattoo.pigments.source = 'photo')}>фото</button>
+            <button class:active={pg.source === 'patches'} onclick={() => (vs.tattoo.pigments.source = 'patches')}>пятна Simplify</button>
+          </div>
+        </div>
+        {#if pg.source === 'patches'}
+          <label class="row"><span>Детали {@render i('simp.details')}</span> <b>{pg.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.pigments.details} /></label>
+        {/if}
+        <p class="muted">Тапни по краске в списке или по месту на эскизе: останется видна только она. Повторный тап покажет все.</p>
       {:else if t.tool === 'lines'}
         <p class="muted">Проверка, удержатся ли линии и просветы при этом размере тату. Красное: линия тоньше минимума, может расплыться или пропасть. Синее: просвет уже минимума, может затянуться. Ширина в см задаёт масштаб: чем меньше тату, тем больше красного и синего.</p>
         <div class="row">
@@ -899,9 +926,10 @@
         {@const pr = ts.pigments}
         <p class="muted">Средняя разница с эскизом ΔE {pr.meanDE} · кожа без краски {Math.round(pr.skinShare * 100)}% · {ts.ms} мс{last.timings.computeMs ? '' : ' · из кэша'}</p>
         <div class="pairs">
-          {#each pr.inks as k}
-            <div class="row"><span class="dot" style="background: {k.hex}"></span><span>{k.name} <span class="muted">· {k.line} · {Math.round(k.share * 100)}%{k.conf === 'm' ? '' : ' · цвет по фото флакона'}</span></span></div>
+          {#each pr.inks as k, j}
+            <button class="inkrow" class:on={vs.tattoo.pigments.focus === j} onclick={() => focusPigment(j)}><span class="dot" style="background: {k.hex}"></span><span>{k.name} <span class="muted">· {k.line} · {Math.round(k.share * 100)}%{k.conf === 'm' ? '' : ' · цвет по фото флакона'}</span></span></button>
           {/each}
+          <button class="inkrow" class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)}><span class="dot" style="background: {vs.tattoo.skin.use ? `rgb(${skinRgb(vs.tattoo.skin).join(',')})` : '#F5F3EF'}"></span><span>Кожа без краски <span class="muted">· {Math.round(pr.skinShare * 100)}%</span></span></button>
         </div>
         {#if pr.misses.length}
           <p class="muted">Не попадают ни в одну краску ближе ΔE {vs.tattoo.pigments.farDE}:</p>
@@ -914,8 +942,10 @@
       {:else if ts.pigments && 'tones' in ts.pigments}
         {@const pr = ts.pigments}
         <div class="levels">
-          {#each pr.tones as L, k}<span style="background: rgb({labToSrgb(L, 0, 0).join(',')}); color: {L > 55 ? '#000' : '#fff'}">{Math.round(pr.shares[k] * 100)}%</span>{/each}
+          {#each pr.tones as L, k}<button class:on={vs.tattoo.pigments.focus === k} onclick={() => focusPigment(k)} style="background: rgb({labToSrgb(L, 0, 0).join(',')}); color: {L > 55 ? '#000' : '#fff'}">{Math.round(pr.shares[k] * 100)}%</button>{/each}
+          <button class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)} style="background: #fff; color: #000">кожа {Math.round(pr.skinShare * 100)}%</button>
         </div>
+        <p class="muted">Тапни по тону или по месту на эскизе, чтобы увидеть, где он.</p>
         <p class="muted">Кожа без краски {Math.round(pr.skinShare * 100)}% · {ts.ms} мс</p>
       {:else if ts.lines}
         <p class="muted">{ts.lines.pxPerMm} px/мм · линий {(ts.lines.inkShare * 100).toFixed(1)}% · тонких {(ts.lines.thinShare * 100).toFixed(1)}% линий · узких зазоров {(ts.lines.gapShare * 100).toFixed(1)}% площади · {ts.ms} мс</p>
@@ -996,7 +1026,7 @@
   </section>
   {/if}
 
-  {#if current}
+  {#if current && tool === 'pipette'}
     {@const c = current.info}
     <section class="card">
       <h2>Цвет</h2>
@@ -1269,6 +1299,9 @@
   .controls label.row { color: var(--muted); font-size: 14px; }
   .controls label.row b { color: var(--fg); min-width: 26px; }
   .controls input[type='range'] { flex: 1; min-width: 160px; }
+  .inkrow { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; margin: 4px 0; padding: 6px 8px; font-size: 13px; }
+  .inkrow.on, .levels button.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .levels button { flex: 1; border: 1px solid var(--line); border-radius: 4px; padding: 4px 0; font-size: 12px; }
   .check { gap: 6px !important; color: var(--fg) !important; }
   .i {
     display: inline-grid; place-items: center; width: 18px; height: 18px; margin-left: 4px; vertical-align: 1px;

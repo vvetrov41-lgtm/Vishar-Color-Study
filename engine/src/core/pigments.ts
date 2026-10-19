@@ -51,6 +51,10 @@ export const INK_BRANDS: string[] = (() => {
 
 export interface PigmentParams {
   mode: 'color' | 'bg';
+  /** photo: every pixel of the photo (as smoothed); patches: Simplify patches first. */
+  source: 'photo' | 'patches';
+  /** Pigment (colour) or tone (B&G) to show on the image, −1 = all, −2 = skin. */
+  focus: number;
   /** Brand name; '' = every brand. */
   brand: string;
   /** Pigments the design may use, besides untouched skin. */
@@ -64,7 +68,7 @@ export interface PigmentParams {
   tonesL: number[];
 }
 
-export const DEFAULT_PIGMENTS: PigmentParams = { mode: 'color', brand: INK_BRANDS[0] ?? '', maxInks: 4, details: 3, farDE: 10, series: -1, tonesL: [75, 55, 35, 12] };
+export const DEFAULT_PIGMENTS: PigmentParams = { mode: 'color', source: 'photo', focus: -1, brand: INK_BRANDS[0] ?? '', maxInks: 4, details: 3, farDE: 10, series: -1, tonesL: [75, 55, 35, 12] };
 
 /** Evenly spaced tones for n dilutions, light to dark, the last one black. */
 export const evenTones = (n: number): number[] => Array.from({ length: n }, (_, i) => Math.round(80 - (i * (80 - 12)) / Math.max(1, n - 1)));
@@ -76,6 +80,8 @@ export interface MissColor { hex: string; share: number; nearest: string; neares
 
 export interface PigmentResult {
   rgba: Uint8ClampedArray;
+  /** Per pixel: index in inks (−1 = skin). */
+  index: Int8Array;
   /** Chosen pigments with their share of the design; skin is the unpainted rest. */
   inks: UsedInk[];
   skinShare: number;
@@ -89,29 +95,40 @@ export interface PigmentResult {
 const SKIN: Lab = [96, 0, 2];
 const hex = (c: readonly number[]) => '#' + c.map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase();
 
-/** Colour classes of a simplified image: colour, Lab and area per distinct colour. */
-function classes(rgba: ArrayLike<number>, n: number) {
-  const idx = new Map<number, number>(), cls = new Int32Array(n), cols: number[] = [], area: number[] = [];
+/**
+ * Colour classes: colour, Lab and area per distinct colour. A photo has too many colours,
+ * so with shift > 0 they are binned (shift bits per channel) and each bin takes its mean colour.
+ */
+function classes(rgba: ArrayLike<number>, n: number, shift = 0) {
+  const idx = new Map<number, number>(), cls = new Int32Array(n), sum: number[] = [], area: number[] = [];
   for (let i = 0, j = 0; i < n; i++, j += 4) {
-    const c = (rgba[j] << 16) | (rgba[j + 1] << 8) | rgba[j + 2];
+    const c = ((rgba[j] >> shift) << 16) | ((rgba[j + 1] >> shift) << 8) | (rgba[j + 2] >> shift);
     let k = idx.get(c);
-    if (k === undefined) { k = cols.length; idx.set(c, k); cols.push(c); area.push(0); }
+    if (k === undefined) { k = area.length; idx.set(c, k); area.push(0); sum.push(0, 0, 0); }
     cls[i] = k; area[k]++;
+    sum[k * 3] += rgba[j]; sum[k * 3 + 1] += rgba[j + 1]; sum[k * 3 + 2] += rgba[j + 2];
   }
+  const cols = area.map((a, k) => (Math.round(sum[k * 3] / a) << 16) | (Math.round(sum[k * 3 + 1] / a) << 8) | Math.round(sum[k * 3 + 2] / a));
   const lab: Lab[] = cols.map((c) => srgbToLab(c >> 16, (c >> 8) & 255, c & 255));
   return { cls, cols, area, lab };
 }
 
+/** Bits dropped per channel when the source is the photo: 32 levels, a few thousand bins. */
+export const PHOTO_SHIFT = 3;
+/** Above this many class × pigment pairs the choice uses plain Lab distance (ΔE76) to stay fast. */
+const DE2000_PAIRS = 400_000;
+const de76 = (a: Lab, b: Lab) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
 /** Pigment version of a simplified design (plan 5.2, colour). */
-export function pigmentMap(rgba: ArrayLike<number>, w: number, h: number, p: PigmentParams): PigmentResult {
-  const t0 = performance.now(), n = w * h, { cls, cols, area, lab } = classes(rgba, n);
+export function pigmentMap(rgba: ArrayLike<number>, w: number, h: number, p: PigmentParams, shift = 0): PigmentResult {
+  const t0 = performance.now(), n = w * h, { cls, cols, area, lab } = classes(rgba, n, shift);
   const cand = INKS.filter((i) => usable(i) && (!p.brand || i.brand === p.brand));
-  const K = cols.length, C = cand.length;
+  const K = cols.length, C = cand.length, de = K * C <= DE2000_PAIRS ? deltaE2000 : de76;
   // ΔE from every design colour to every pigment, and to untouched skin.
   const D = new Float32Array(K * C), skin = new Float32Array(K);
   for (let k = 0; k < K; k++) {
-    skin[k] = deltaE2000(lab[k], SKIN);
-    for (let c = 0; c < C; c++) D[k * C + c] = deltaE2000(lab[k], cand[c].lab);
+    skin[k] = de(lab[k], SKIN);
+    for (let c = 0; c < C; c++) D[k * C + c] = de(lab[k], cand[c].lab);
   }
   // Greedy choice: add the pigment that lowers the area-weighted ΔE most, up to maxInks.
   const best = Float32Array.from(skin), chosen: number[] = [];
@@ -127,15 +144,20 @@ export function pigmentMap(rgba: ArrayLike<number>, w: number, h: number, p: Pig
     chosen.push(pick);
     for (let k = 0; k < K; k++) best[k] = Math.min(best[k], D[k * C + pick]);
   }
-  // Assignment per class: −1 = skin.
+  // Assignment per class: −1 = skin. The mean is always ΔE2000.
   const asg = new Int32Array(K), used = new Float64Array(chosen.length);
   let skinArea = 0, sumDE = 0;
   for (let k = 0; k < K; k++) {
     let a = -1, d = skin[k];
     chosen.forEach((c, j) => { if (D[k * C + c] < d) { d = D[k * C + c]; a = j; } });
-    asg[k] = a; sumDE += d * area[k];
+    asg[k] = a; sumDE += (a < 0 ? deltaE2000(lab[k], SKIN) : deltaE2000(lab[k], cand[chosen[a]].lab)) * area[k];
     if (a < 0) skinArea += area[k]; else used[a] += area[k];
   }
+  // Inks are reported by share, largest first; the per-pixel index follows that order.
+  const order = chosen.map((_, j) => j).sort((x, y) => used[y] - used[x]), rank = new Int8Array(chosen.length);
+  order.forEach((j, r) => (rank[j] = r));
+  const index = new Int8Array(n);
+  for (let i = 0; i < n; i++) { const a = asg[cls[i]]; index[i] = a < 0 ? -1 : rank[a]; }
   const paint = chosen.map((c) => { const v = parseInt(cand[c].hex.slice(1), 16); return [v >> 16, (v >> 8) & 255, v & 255]; });
   const skinRgb = labToSrgb(...SKIN);
   const out = new Uint8ClampedArray(n * 4);
@@ -156,13 +178,14 @@ export function pigmentMap(rgba: ArrayLike<number>, w: number, h: number, p: Pig
     }
   }
   misses.sort((a, b) => b.share - a.share);
-  const inks = chosen.map((c, j) => ({ id: cand[c].id, name: cand[c].name, line: cand[c].line, hex: cand[c].hex, conf: cand[c].conf, share: round3(used[j] / n) }))
-    .sort((a, b) => b.share - a.share);
-  return { rgba: out, inks, skinShare: round3(skinArea / n), misses: misses.slice(0, 8), meanDE: round1(sumDE / n), ms: Math.round(performance.now() - t0) };
+  const inks = order.map((j) => { const c = cand[chosen[j]]; return { id: c.id, name: c.name, line: c.line, hex: c.hex, conf: c.conf, share: round3(used[j] / n) }; });
+  return { rgba: out, index, inks, skinShare: round3(skinArea / n), misses: misses.slice(0, 8), meanDE: round1(sumDE / n), ms: Math.round(performance.now() - t0) };
 }
 
 export interface GreyResult {
   rgba: Uint8ClampedArray;
+  /** Per pixel: tone index (−1 = skin). */
+  index: Int8Array;
   /** Share of the design per tone, light to dark; skin is the rest. */
   shares: number[];
   skinShare: number;
@@ -170,8 +193,8 @@ export interface GreyResult {
 }
 
 /** Black & Grey: every patch goes to the tone of nearest L*; lighter than the lightest tone's midpoint to 100 stays skin. */
-export function greyTones(rgba: ArrayLike<number>, w: number, h: number, tonesL: number[]): GreyResult {
-  const t0 = performance.now(), n = w * h, { cls, area, lab } = classes(rgba, n);
+export function greyTones(rgba: ArrayLike<number>, w: number, h: number, tonesL: number[], shift = 0): GreyResult {
+  const t0 = performance.now(), n = w * h, { cls, area, lab } = classes(rgba, n, shift);
   const tones = [...tonesL].map((v) => Math.min(100, Math.max(0, v)));
   const skinFrom = (100 + Math.max(...tones)) / 2;
   const grey = tones.map((L) => labToSrgb(L, 0, 0)[0]);
@@ -184,12 +207,27 @@ export function greyTones(rgba: ArrayLike<number>, w: number, h: number, tonesL:
   const shares = tones.map(() => 0);
   let skinArea = 0;
   asg.forEach((a, k) => { if (a < 0) skinArea += area[k]; else shares[a] += area[k]; });
-  const out = new Uint8ClampedArray(n * 4);
+  const out = new Uint8ClampedArray(n * 4), index = new Int8Array(n);
   for (let i = 0, j = 0; i < n; i++, j += 4) {
     const a = asg[cls[i]], g = a < 0 ? 255 : grey[a];
     out[j] = out[j + 1] = out[j + 2] = g; out[j + 3] = 255;
+    index[i] = a;
   }
-  return { rgba: out, shares: shares.map((s) => round3(s / n)), skinShare: round3(skinArea / n), ms: Math.round(performance.now() - t0) };
+  return { rgba: out, index, shares: shares.map((s) => round3(s / n)), skinShare: round3(skinArea / n), ms: Math.round(performance.now() - t0) };
+}
+
+/**
+ * One pigment or tone on the image: its pixels keep their colour, the rest fades to a pale
+ * grey of its own lightness. focus −2 shows the untouched skin.
+ */
+export function focusOn(rgba: Uint8ClampedArray, index: Int8Array, focus: number): Uint8ClampedArray {
+  const out = new Uint8ClampedArray(rgba.length), want = focus === -2 ? -1 : focus;
+  for (let i = 0, j = 0; i < index.length; i++, j += 4) {
+    if (index[i] === want) { out[j] = rgba[j]; out[j + 1] = rgba[j + 1]; out[j + 2] = rgba[j + 2]; }
+    else { const y = (rgba[j] * 0.3 + rgba[j + 1] * 0.59 + rgba[j + 2] * 0.11) * 0.25 + 190; out[j] = out[j + 1] = out[j + 2] = y; }
+    out[j + 3] = 255;
+  }
+  return out;
 }
 
 const round1 = (v: number) => Math.round(v * 10) / 10;

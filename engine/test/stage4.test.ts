@@ -4,7 +4,7 @@ import { deltaE2000 } from '../src/core/colorinfo';
 import { CalLut, calibrateImage, calibrateLab, DEFAULT_SKIN, NEUTRAL, OWN_TONE, skinView, tileAt } from '../src/core/skin';
 import { contrastMap, DEFAULT_CONTRAST, MARK_A } from '../src/core/contrast';
 import { stencilPdf } from '../src/core/pdf';
-import { DEFAULT_PIGMENTS, GREY_SERIES, greyTones, INK_BRANDS, INKS, pigmentMap } from '../src/core/pigments';
+import { DEFAULT_PIGMENTS, focusOn, GREY_SERIES, greyTones, INK_BRANDS, INKS, PHOTO_SHIFT, pigmentMap } from '../src/core/pigments';
 import {
   checkLines, DEFAULT_TATTOO, distanceTo, narrowParts, SKIN_TONES, skinPreview, spreadPreview, viewBlurPx, viewFromDistance,
 } from '../src/core/tattoo';
@@ -153,6 +153,18 @@ describe('pigments', () => {
     expect(r.misses.length).toBe(1);
     expect(r.misses[0].hex).toBe('#00FF00');
     expect(r.misses[0].nearest.length).toBeGreaterThan(0);
+  });
+
+  it('photo source: the per-pixel index follows the ink list, focus keeps only that ink', () => {
+    const img = loadFixture('portrait');
+    const r = pigmentMap(img.data, img.w, img.h, { ...DEFAULT_PIGMENTS, maxInks: 6 }, PHOTO_SHIFT);
+    expect(r.inks.length).toBe(6);
+    const count = r.inks.map(() => 0);
+    for (const k of r.index) if (k >= 0) count[k]++;
+    r.inks.forEach((k, j) => expect(Math.abs(count[j] / r.index.length - k.share)).toBeLessThan(0.002));
+    const f = focusOn(r.rgba, r.index, 0), i = r.index.indexOf(0), o = r.index.findIndex((k) => k !== 0);
+    expect([...f.subarray(i * 4, i * 4 + 3)]).toEqual([...r.rgba.subarray(i * 4, i * 4 + 3)]);
+    expect(f[o * 4]).toBeGreaterThanOrEqual(190);
   });
 
   it('black & grey maps L* to the nearest tone, light paper stays skin', () => {

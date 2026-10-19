@@ -94,6 +94,11 @@ export class EngineClient {
     return this.api.palette(params);
   }
 
+  /** Pigment or tone under (u, v) in Тату → Пигменты: index, −2 = skin, null = none. */
+  pickPigment(u: number, v: number): Promise<number | null> {
+    return this.api.pickPigment(u, v);
+  }
+
   /** Pipette at (u, v), 0..1 of the working copy. */
   pickColor(u: number, v: number, size: number): Promise<PickResult | null> {
     return this.api.pickColor(u, v, size);
