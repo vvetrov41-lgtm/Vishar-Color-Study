@@ -7,7 +7,7 @@
   import { colorInfo, compareColors, deltaE2000, hex, type ColorInfo } from '../src/core/colorinfo';
   import { DEFAULT_PALETTE, type Swatch } from '../src/core/palette';
   import { DEFAULT_VIEW, type ViewState } from '../src/core/view';
-  import { SKIN_TONES, type TattooTool } from '../src/core/tattoo';
+  import { DEFAULT_TATTOO, SKIN_TONES, type TattooTool } from '../src/core/tattoo';
   import type { OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
 
   const VERSION = __ENGINE_VERSION__;
@@ -730,7 +730,10 @@
       <div class="seg wrap">
         {#each TOOLS as [k, label]}<button class:active={t.tool === k} onclick={() => (vs.tattoo.tool = k)}>{label}</button>{/each}
       </div>
-      <label class="row">Ширина тату, см <b>{t.widthCm}</b><input type="range" min="2" max="40" step="0.5" bind:value={vs.tattoo.widthCm} /></label>
+      {#if t.tool !== 'skin'}
+        <label class="row">Ширина тату, см <b>{t.widthCm}</b><input type="range" min="2" max="40" step="0.5" bind:value={vs.tattoo.widthCm} /></label>
+      {/if}
+      <div class="row"><span class="muted">Настройки всех инструментов</span><button onclick={() => (vs.tattoo = { ...structuredClone(DEFAULT_TATTOO), tool: t.tool })}>Сбросить</button></div>
       {#if t.tool === 'contrast'}
         <p class="muted">Эскиз упрощается до пятен; границы соседних цветов с близкой светлотой отмечены полосками: со временем они могут слиться.</p>
         <label class="row">Порог ΔL* <b>{t.contrast.minDL}</b><input type="range" min="3" max="40" bind:value={vs.tattoo.contrast.minDL} /></label>
@@ -739,6 +742,7 @@
         <label class="row">«Один градиент» до ΔE <b>{t.contrast.sameDE}</b><input type="range" min="0" max="15" bind:value={vs.tattoo.contrast.sameDE} /></label>
         <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.contrast.bw} /> Ч/б: показать светлоту вместо цвета</label>
       {:else if t.tool === 'lines'}
+        <p class="muted">Проверка, удержатся ли линии и просветы при этом размере тату. Красное: линия тоньше минимума, может расплыться или пропасть. Синее: просвет уже минимума, может затянуться. Ширина в см задаёт масштаб: чем меньше тату, тем больше красного и синего.</p>
         <div class="row">
           <span>Линии</span>
           <div class="seg">
@@ -748,6 +752,7 @@
         </div>
         {#if t.lines.source === 'design'}
           <label class="row">Линия темнее L* <b>{t.lines.inkL}</b><input type="range" min="5" max="80" bind:value={vs.tattoo.lines.inkL} /></label>
+          <p class="muted">Пиксели темнее этой светлоты считаются линией (серые на картинке). 0 = чёрный, 100 = белый.</p>
         {:else}
           <p class="muted">Берётся текущий Drawing: стиль, Line и Stroke настраиваются во вкладке Drawing.</p>
         {/if}
@@ -768,7 +773,7 @@
         <label class="row">Размытие, мм <b>{t.spread.blurMm}</b><input type="range" min="0" max="0.5" step="0.05" bind:value={vs.tattoo.spread.blurMm} /></label>
         <p class="muted">Так может снизиться читаемость; реальный результат зависит от кожи и техники.</p>
       {:else}
-        <p class="muted">Эскиз поверх тонов кожи I–VI (шкала Фицпатрика, ориентировочно): слева направо, сверху вниз. Белый пигмент на тёмной коже почти не виден.</p>
+        <p class="muted">Своих настроек нет. Эскиз поверх тонов кожи I–VI (шкала Фицпатрика, ориентировочно): слева направо, сверху вниз. Белый пигмент на тёмной коже почти не виден.</p>
         <div class="row">{#each SKIN_TONES as c, i}<span class="dot" style="background: rgb({c.join(',')})"></span><span class="muted">{SKIN_NAMES[i]}</span>{/each}</div>
       {/if}
     {/if}
@@ -795,6 +800,7 @@
         </div>
       {:else if ts.lines}
         <p class="muted">{ts.lines.pxPerMm} px/мм · линий {(ts.lines.inkShare * 100).toFixed(1)}% · тонких {(ts.lines.thinShare * 100).toFixed(1)}% линий · узких зазоров {(ts.lines.gapShare * 100).toFixed(1)}% площади · {ts.ms} мс</p>
+        {#if ts.lines.inkShare < 0.005}<p class="error">Линией почти ничего не считается ({(ts.lines.inkShare * 100).toFixed(1)}%). Подними «Линия темнее L*» или нажми «Сбросить».</p>{/if}
         {#if ts.lines.lowResolution}<p class="error">Разрешения мало: минимальная линия меньше 2 px. Уменьши ширину тату или открой фото крупнее.</p>{/if}
       {:else if ts.distance}
         {@const f = ts.distance.figure}
