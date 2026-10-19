@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Debug page for stages 1–3: not the Color Study interface. It drives the engine,
+  // Debug page for stages 1–4: not the Color Study interface. It drives the engine,
   // shows the numbers behind each view and checks the stage acceptance targets on a device.
   import { onMount } from 'svelte';
   import { EngineClient } from '../src/client';
@@ -7,6 +7,7 @@
   import { colorInfo, compareColors, deltaE2000, hex, type ColorInfo } from '../src/core/colorinfo';
   import { DEFAULT_PALETTE, type Swatch } from '../src/core/palette';
   import { DEFAULT_VIEW, type ViewState } from '../src/core/view';
+  import { SKIN_TONES, type TattooTool } from '../src/core/tattoo';
   import type { OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
 
   const VERSION = __ENGINE_VERSION__;
@@ -27,7 +28,9 @@
   const TARGET2 = { paletteMs: 500, highlightMs: 50, markerDE: 2 };
   // Stage 3 targets: Clustering ≤ 1 s on the working copy, Graph ≤ 3 s with a progress indicator.
   const TARGET3 = { clusteringMs: 1000, graphMs: 3000, drawSliderMs: 50 };
-  const TABS = [['original', 'Оригинал'], ['values', 'Values'], ['notan', 'Notan'], ['temperature', 'Temp'], ['highlight', 'Highlight'], ['simplify', 'Simplify'], ['drawing', 'Drawing']] as const;
+  const TABS = [['original', 'Оригинал'], ['values', 'Values'], ['notan', 'Notan'], ['temperature', 'Temp'], ['highlight', 'Highlight'], ['simplify', 'Simplify'], ['drawing', 'Drawing'], ['tattoo', 'Тату']] as const;
+  const TOOLS: Array<[TattooTool, string]> = [['contrast', 'Контраст'], ['lines', 'Линии'], ['distance', 'Расстояние'], ['spread', 'Расплывание'], ['skin', 'Кожа']];
+  const SKIN_NAMES = ['I', 'II', 'III', 'IV', 'V', 'VI'];
   const SIZES = [1, 3, 5, 11];
   const KINDS = [['dominant', 'Dominant'], ['range', 'Range'], ['accents', 'Accents']] as const;
   type Kind = (typeof KINDS)[number][0];
@@ -72,6 +75,9 @@
   let drawSlider = $state({ n: 0, max: 0, samples: [] as number[] });
   let lastDraw = { base: '', line: -1 };
   let svgInfo: (Omit<SvgExport, 'svg'> & { bytes: number }) | null = $state(null);
+  // Stage 4: time of the first computation of each tattoo tool on this photo, stencil export.
+  let tattooLog = $state({} as Record<string, { ms: number; work: string }>);
+  let stencilInfo: { pageMm: [number, number]; designMm: [number, number]; ms: number; bytes: number } | null = $state(null);
 
   // Main-thread stall monitor: a 16 ms timer that measures its own lateness.
   function jank() {
@@ -105,6 +111,8 @@
           set: async (patch: Partial<ViewState>) => { Object.assign(vs, patch); await apply(); return report(); },
           palette: async () => { await runPalette(); return { palette: $state.snapshot(palette), markers: $state.snapshot(markerCheck) }; },
           pick: (u: number, v: number, size: number) => engine?.pickColor(u, v, size),
+          tattoo: async (tool: TattooTool) => { vs.view = 'tattoo'; vs.tattoo = { ...vs.tattoo, tool }; await apply(); return report(); },
+          stencil: async () => { const r = await engine!.exportStencil(); return { pageMm: r.pageMm, designMm: r.designMm, ms: r.ms, bytes: r.pdf.length, head: new TextDecoder().decode(r.pdf.subarray(0, 8)) }; },
           svg: async () => { const s = await engine!.exportSvg(); return { loops: s.loops, points: s.points, ms: s.ms, bytes: s.svg.length, head: s.svg.slice(0, 200) }; },
           report,
         },
@@ -139,6 +147,8 @@
       computeLog = {};
       drawSlider = { n: 0, max: 0, samples: [] };
       svgInfo = null;
+      tattooLog = {};
+      stencilInfo = null;
     } catch (e) {
       error = String((e as Error)?.message ?? e);
     } finally {
@@ -147,6 +157,10 @@
   }
 
   function logCompute(r: ViewResult) {
+    if (vs.view === 'tattoo' && r.timings.computeMs > 0) {
+      tattooLog[vs.tattoo.tool] = { ms: r.timings.computeMs, work: `${r.work.width}×${r.work.height}` };
+      return;
+    }
     if ((vs.view !== 'simplify' && vs.view !== 'drawing') || !(r.timings.computeMs > 0)) return;
     const key = vs.view === 'simplify' ? vs.simplify.mode : vs.drawing.mode;
     computeLog[key] = { ms: r.timings.computeMs, algoMs: r.stats.simplify?.ms.total, work: `${r.work.width}×${r.work.height}`, regions: r.stats.simplify?.regions, colors: r.stats.simplify?.colors };
@@ -175,6 +189,7 @@
     last = r;
     progress = 0;
     // Frames that had to re-run the analysis (new smoothing) are not slider frames.
+    if (vs.view === 'tattoo') { logCompute(r); return; }
     if (vs.view === 'simplify' || vs.view === 'drawing') {
       logCompute(r);
       // Line slider frames only: same style, Stroke and smoothing, a new Line value.
@@ -396,7 +411,7 @@
 
   function report() {
     return {
-      schema: 'vishar-stage3-report/1',
+      schema: 'vishar-stage4-report/1',
       build: VERSION,
       at: new Date().toISOString(),
       userAgent: navigator.userAgent,
@@ -429,6 +444,12 @@
         simplify: $state.snapshot(vs.simplify),
         drawing: $state.snapshot(vs.drawing),
       },
+      stage4: {
+        compute: $state.snapshot(tattooLog),
+        tattoo: $state.snapshot(vs.tattoo),
+        stats: last?.stats.tattoo ?? null,
+        stencil: stencilInfo,
+      },
     };
   }
 
@@ -446,9 +467,9 @@
 
   async function shareReport() {
     const text = JSON.stringify(report(), null, 1);
-    const file = new File([text], `vishar-stage3-${Date.now()}.json`, { type: 'application/json' });
+    const file = new File([text], `vishar-stage4-${Date.now()}.json`, { type: 'application/json' });
     try {
-      if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: 'Vishar Stage 3' });
+      if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: 'Vishar Stage 4' });
       else await navigator.share({ text });
     } catch {}
   }
@@ -488,6 +509,17 @@
     await shareFile(await engine.exportInkPng(), `vishar-${vs.drawing.mode}-transparent.png`);
   }
 
+  async function exportStencil() {
+    if (!engine) return;
+    try {
+      const s = await engine.exportStencil(), blob = new Blob([s.pdf as BlobPart], { type: 'application/pdf' });
+      stencilInfo = { pageMm: s.pageMm, designMm: s.designMm, ms: s.ms, bytes: blob.size };
+      await shareFile(blob, `vishar-stencil-${vs.tattoo.widthCm}cm${vs.tattoo.lines.mirror ? '-mirror' : ''}.pdf`);
+    } catch (e) {
+      error = String((e as Error)?.message ?? e);
+    }
+  }
+
   async function exportPng() {
     if (!engine) return;
     const blob = await engine.exportWork();
@@ -503,7 +535,7 @@
 
 <main>
   <header>
-    <h1>Vishar Engine · Stage 3</h1>
+    <h1>Vishar Engine · Stage 4</h1>
     <p class="sub">Отладочная страница ядра, не интерфейс приложения · {VERSION}</p>
   </header>
 
@@ -693,15 +725,86 @@
         <span class="muted">SVG для Illustrator, PNG без фона для Procreate (SVG он не открывает)</span>
       </div>
       {#if svgInfo}<p class="muted">SVG: {svgInfo.loops} контуров, {svgInfo.points} точек, {(svgInfo.bytes / 1024).toFixed(0)} КБ, {svgInfo.ms} мс</p>{/if}
+    {:else if vs.view === 'tattoo'}
+      {@const t = vs.tattoo}
+      <div class="seg wrap">
+        {#each TOOLS as [k, label]}<button class:active={t.tool === k} onclick={() => (vs.tattoo.tool = k)}>{label}</button>{/each}
+      </div>
+      <label class="row">Ширина тату, см <b>{t.widthCm}</b><input type="range" min="2" max="40" step="0.5" bind:value={vs.tattoo.widthCm} /></label>
+      {#if t.tool === 'contrast'}
+        <p class="muted">Эскиз упрощается до пятен; границы соседних цветов с близкой светлотой отмечены полосками: со временем они могут слиться.</p>
+        <label class="row">Порог ΔL* <b>{t.contrast.minDL}</b><input type="range" min="3" max="40" bind:value={vs.tattoo.contrast.minDL} /></label>
+        <label class="row">Детали <b>{t.contrast.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.contrast.details} /></label>
+        <label class="row">Лимит цветов <b>{t.contrast.levels || 'нет'}</b><input type="range" min="0" max="5" bind:value={vs.tattoo.contrast.levels} /></label>
+        <label class="row">«Один градиент» до ΔE <b>{t.contrast.sameDE}</b><input type="range" min="0" max="15" bind:value={vs.tattoo.contrast.sameDE} /></label>
+        <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.contrast.bw} /> Ч/б: показать светлоту вместо цвета</label>
+      {:else if t.tool === 'lines'}
+        <div class="row">
+          <span>Линии</span>
+          <div class="seg">
+            <button class:active={t.lines.source === 'design'} onclick={() => (vs.tattoo.lines.source = 'design')}>тёмное эскиза</button>
+            <button class:active={t.lines.source === 'drawing'} onclick={() => (vs.tattoo.lines.source = 'drawing')}>из Drawing</button>
+          </div>
+        </div>
+        {#if t.lines.source === 'design'}
+          <label class="row">Линия темнее L* <b>{t.lines.inkL}</b><input type="range" min="5" max="80" bind:value={vs.tattoo.lines.inkL} /></label>
+        {:else}
+          <p class="muted">Берётся текущий Drawing: стиль, Line и Stroke настраиваются во вкладке Drawing.</p>
+        {/if}
+        <label class="row">Мин. линия, мм <b>{t.lines.minLineMm}</b><input type="range" min="0.1" max="2" step="0.05" bind:value={vs.tattoo.lines.minLineMm} /></label>
+        <label class="row">Мин. зазор, мм <b>{t.lines.minGapMm}</b><input type="range" min="0.2" max="3" step="0.1" bind:value={vs.tattoo.lines.minGapMm} /></label>
+        <p class="muted"><span class="dot" style="background: rgb(230,0,40)"></span> линия тоньше минимума · <span class="dot" style="background: rgb(0,110,255)"></span> зазор уже минимума</p>
+        <div class="row">
+          <label class="check"><input type="checkbox" bind:checked={vs.tattoo.lines.mirror} /> зеркально</label>
+          <button class="primary" onclick={exportStencil} disabled={!opened}>Трафарет PDF 1:1</button>
+        </div>
+        {#if stencilInfo}<p class="muted">PDF: эскиз {stencilInfo.designMm[0]}×{stencilInfo.designMm[1]} мм на листе {stencilInfo.pageMm[0]}×{stencilInfo.pageMm[1]} мм, {(stencilInfo.bytes / 1024).toFixed(0)} КБ. Печатай в масштабе 100 % и проверь линейку 10 мм.</p>{/if}
+      {:else if t.tool === 'distance'}
+        <label class="row">Расстояние, м <b>{t.distance.distanceM}</b><input type="range" min="0.5" max="10" step="0.5" bind:value={vs.tattoo.distance.distanceM} /></label>
+        <label class="row">Острота зрения, ′ <b>{t.distance.arcmin}</b><input type="range" min="0.5" max="3" step="0.5" bind:value={vs.tattoo.distance.arcmin} /></label>
+      {:else if t.tool === 'spread'}
+        <label class="row">Растекание, мм <b>{t.spread.spreadMm}</b><input type="range" min="0" max="0.6" step="0.05" bind:value={vs.tattoo.spread.spreadMm} /></label>
+        <label class="row">Контраст <b>{Math.round(t.spread.contrast * 100)}%</b><input type="range" min="0.5" max="1" step="0.05" bind:value={vs.tattoo.spread.contrast} /></label>
+        <label class="row">Размытие, мм <b>{t.spread.blurMm}</b><input type="range" min="0" max="0.5" step="0.05" bind:value={vs.tattoo.spread.blurMm} /></label>
+        <p class="muted">Так может снизиться читаемость; реальный результат зависит от кожи и техники.</p>
+      {:else}
+        <p class="muted">Эскиз поверх тонов кожи I–VI (шкала Фицпатрика, ориентировочно): слева направо, сверху вниз. Белый пигмент на тёмной коже почти не виден.</p>
+        <div class="row">{#each SKIN_TONES as c, i}<span class="dot" style="background: rgb({c.join(',')})"></span><span class="muted">{SKIN_NAMES[i]}</span>{/each}</div>
+      {/if}
     {/if}
 
-    {#if vs.view !== 'original' && vs.view !== 'simplify' && vs.view !== 'drawing'}<canvas class="hist" bind:this={hcanvas}></canvas>{/if}
+    {#if vs.view !== 'original' && vs.view !== 'simplify' && vs.view !== 'drawing' && vs.view !== 'tattoo'}<canvas class="hist" bind:this={hcanvas}></canvas>{/if}
     {#if last?.stats.simplify}
       {@const s = last.stats.simplify}
       <p class="muted">Пятен {s.regions} · цветов {s.colors}{s.inkShare ? ` · тёмных элементов ${(s.inkShare * 100).toFixed(1)}%` : ''} · {s.ms.total} мс (сегментация {s.ms.segment}, слияние {s.ms.merge}, заливка {s.ms.paint}){last.timings.computeMs ? '' : ' · из кэша'}</p>
     {/if}
     {#if last?.stats.drawing}
       <p class="muted">Линий {(last.stats.drawing.inkShare * 100).toFixed(1)}% площади · расчёт {last.timings.computeMs} мс, загрузка в GPU {last.timings.uploadMs} мс, туда-обратно {last.roundTripMs} мс</p>
+    {/if}
+    {#if last?.stats.tattoo}
+      {@const ts = last.stats.tattoo}
+      {#if ts.contrast}
+        <p class="muted">Цветов {ts.contrast.colors} · слабых границ {ts.contrast.weakPairs} ({Math.round(ts.contrast.weakShare * 100)}% длины всех границ) · {ts.ms} мс{last.timings.computeMs ? '' : ' · из кэша'}</p>
+        <div class="pairs">
+          {#each ts.contrast.pairs as p}
+            <div class="row" class:weak={p.weak}>
+              <span class="dot" style="background: {p.a}"></span><span class="dot" style="background: {p.b}"></span>
+              <span>ΔL* {p.dL} · ΔE {p.dE} · граница {p.border}{p.colorOnColor ? ' · цвет на цвете' : ''}</span>
+            </div>
+          {/each}
+        </div>
+      {:else if ts.lines}
+        <p class="muted">{ts.lines.pxPerMm} px/мм · линий {(ts.lines.inkShare * 100).toFixed(1)}% · тонких {(ts.lines.thinShare * 100).toFixed(1)}% линий · узких зазоров {(ts.lines.gapShare * 100).toFixed(1)}% площади · {ts.ms} мс</p>
+        {#if ts.lines.lowResolution}<p class="error">Разрешения мало: минимальная линия меньше 2 px. Уменьши ширину тату или открой фото крупнее.</p>{/if}
+      {:else if ts.distance}
+        {@const f = ts.distance.figure}
+        <p class="muted">Размытие {ts.distance.blurPx} px · Notan совпадает на {Math.round(ts.distance.iou * 100)}% (IoU) · {ts.ms} мс</p>
+        <p class="muted">Фигура/фон: тёмного {Math.round(f.darkShare * 100)}%, крупных тёмных пятен {f.bigDark}, главное пятно {Math.round(f.dominant * 100)}% тёмного</p>
+      {:else if ts.spread}
+        <p class="muted">Растекание {ts.spread.spreadPx} px · размытие {ts.spread.blurPx} px · {ts.ms} мс</p>
+      {:else}
+        <p class="muted">{ts.ms} мс</p>
+      {/if}
     {/if}
     {#if last?.stats.values}
       <div class="levels">
@@ -781,6 +884,21 @@
       {/if}
     </section>
   {/if}
+
+  <section class="card">
+    <h2>Этап 4: тату-инструменты</h2>
+    {#if opened}
+      <ul class="targets">
+        {#each TOOLS as [k, label]}
+          <li class={ok(!!tattooLog[k])}>{label}: {tattooLog[k] ? `${tattooLog[k].ms} мс на ${tattooLog[k].work}` : 'открой во вкладке Тату'}</li>
+        {/each}
+        <li class={ok(!!stencilInfo)}>Трафарет PDF: {stencilInfo ? `${stencilInfo.designMm[0]}×${stencilInfo.designMm[1]} мм; распечатай в 100 % и сверь линейку` : 'Тату → Линии → «Трафарет PDF 1:1»'}</li>
+      </ul>
+      <p class="muted">Приёмка этапа: на 10 эскизах студии предупреждения совпадают с оценкой мастера минимум в 8 случаях. Пороги стартовые и настраиваются.</p>
+    {:else}
+      <p class="muted">Открой эскиз.</p>
+    {/if}
+  </section>
 
   <section class="card">
     <h2>Цели этапа 3</h2>
@@ -987,6 +1105,8 @@
   .controls input[type='range'] { flex: 1; min-width: 160px; }
   .check { gap: 6px !important; color: var(--fg) !important; }
   .seg { display: flex; gap: 4px; flex-wrap: wrap; }
+  .pairs .row { font-size: 13px; }
+  .pairs .weak { color: var(--accent); }
   .hist { width: 100%; height: 64px; display: block; margin-top: 8px; }
   .levels { display: flex; gap: 2px; margin-top: 6px; }
   .levels span { flex: 1; text-align: center; font-size: 11px; padding: 3px 0; border-radius: 4px; border: 1px solid var(--line); }

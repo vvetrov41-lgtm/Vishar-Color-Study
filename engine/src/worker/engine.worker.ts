@@ -9,13 +9,16 @@ import { DrawingCache, lightness, type DrawingResult } from '../core/drawing';
 import { DEFAULT_PALETTE, extractPalette, meanRgb, sampleGrid, square, type Grid, type PaletteParams } from '../core/palette';
 import { simplify, type SimplifyResult } from '../core/simplify';
 import { maskToSvg } from '../core/vector';
+import { contrastMap, contrastSimplify } from '../core/contrast';
+import { stencilPdf } from '../core/pdf';
+import { checkLines, designInk, skinPreview, spreadPreview, viewFromDistance } from '../core/tattoo';
 import { ORIGINAL_VALUES_9, levelAgreement } from '../core/compat';
 import { histogramsFromLab8, type Histograms } from '../core/histogram';
 import { fitLongSide, HEADER_BYTES, parseImageInfo } from '../core/imageinfo';
-import { DEFAULT_VIEW, planView, renderReference, type Smoothing, type ViewPlan, type ViewState } from '../core/view';
+import { DEFAULT_VIEW, planView, renderReference, type Smoothing, type TattooStats, type ViewPlan, type ViewState } from '../core/view';
 import { levelOf, valuesThresholds } from '../core/values';
 import { Renderer, type ScreenRect } from '../gpu/renderer';
-import type { Caps, CompatCase, OpenOptions, OpenResult, PaletteResult, ParityCase, ParityReport, PickResult, SvgExport, ViewResult } from '../types';
+import type { Caps, CompatCase, OpenOptions, OpenResult, PaletteResult, ParityCase, ParityReport, PickResult, StencilExport, SvgExport, ViewResult } from '../types';
 
 const now = () => performance.now();
 const round1 = (v: number) => Math.round(v * 10) / 10;
@@ -44,6 +47,9 @@ class Engine {
   private simplified: { key: string; res: SimplifyResult; ms: number } | null = null;
   private drawn: { key: string; res: DrawingResult; ms: number } | null = null;
   private drawCache = new Map<Smoothing, DrawingCache>();
+  // Tattoo tools: the current result, plus the simplification the contrast map is built from.
+  private tat: { key: string; rgba: Uint8ClampedArray; stats: TattooStats; ink?: Uint8Array } | null = null;
+  private tatSeg: { key: string; res: SimplifyResult } | null = null;
   private uploaded = '';
   private progress: ((share: number, stage: string) => void) | null = null;
 
@@ -55,6 +61,7 @@ class Engine {
     this.dHist = null;
     this.simplified = this.drawn = null;
     this.drawCache.clear();
+    this.tat = this.tatSeg = null;
     this.uploaded = '';
   }
 
@@ -81,7 +88,12 @@ class Engine {
       }
       return { rgba: this.simplified.res.rgba, key, ms: 0 };
     }
-    const key = `d:${lv}:${JSON.stringify(state.drawing)}`;
+    if (state.view === 'tattoo') return this.tattoo(state);
+    return this.drawing(state);
+  }
+
+  private drawing(state: ViewState): { rgba: Uint8ClampedArray; key: string; ms: number } {
+    const r = this.renderer, lv = state.smoothing, key = `d:${lv}:${JSON.stringify(state.drawing)}`;
     if (this.drawn?.key !== key) {
       const t0 = now();
       let c = this.drawCache.get(lv);
@@ -91,6 +103,52 @@ class Engine {
       return { rgba: res.rgba, key, ms: this.drawn.ms };
     }
     return { rgba: this.drawn.res.rgba, key, ms: 0 };
+  }
+
+  /** Current tattoo tool (plan 5.1–5.4); only the parameters of that tool are in the key. */
+  private tattoo(state: ViewState): { rgba: Uint8ClampedArray; key: string; ms: number } {
+    const r = this.renderer, lv = state.smoothing, t = state.tattoo, w = r.w, h = r.h, n = w * h;
+    const own = t.tool === 'contrast' ? t.contrast : t.tool === 'lines' ? [t.lines, t.lines.source === 'drawing' ? state.drawing : null]
+      : t.tool === 'distance' ? t.distance : t.tool === 'spread' ? t.spread : null;
+    const key = `t:${lv}:${t.tool}:${t.widthCm}:${JSON.stringify(own)}`;
+    if (this.tat?.key === key) return { rgba: this.tat.rgba, key, ms: 0 };
+    const t0 = now(), stats: TattooStats = { tool: t.tool, ms: 0 };
+    let rgba: Uint8ClampedArray, ink: Uint8Array | undefined;
+    if (t.tool === 'contrast') {
+      const sp = contrastSimplify(t.contrast), skey = `${lv}:${JSON.stringify(sp)}`;
+      if (this.tatSeg?.key !== skey) {
+        const res = simplify({
+          w, h, px: this.pixels(lv), lab8: this.analyzed(lv).a.lab8, px0: this.pixels(0), lab0: this.analyzed(0).a.lab8,
+        }, sp, (s, stage) => this.progress?.(s * 0.9, stage));
+        this.tatSeg = { key: skey, res };
+      }
+      const c = contrastMap(this.tatSeg.res.rgba, w, h, t.contrast);
+      rgba = c.rgba;
+      stats.contrast = { pairs: c.pairs, weakPairs: c.weakPairs, weakShare: c.weakShare, colors: this.tatSeg.res.colors };
+    } else if (t.tool === 'lines') {
+      if (t.lines.source === 'drawing') {
+        this.drawing(state);
+        const inkF = this.drawn!.res.ink;
+        ink = new Uint8Array(n);
+        for (let i = 0; i < n; i++) ink[i] = inkF[i] > 0.5 ? 1 : 0;
+      } else ink = designInk(this.analyzed(lv).a.lab8, n, t.lines.inkL);
+      const res = checkLines(ink, w, h, t.widthCm, t.lines);
+      rgba = res.rgba;
+      stats.lines = { pxPerMm: res.pxPerMm, inkShare: res.inkShare, thinShare: res.thinShare, gapShare: res.gapShare, lowResolution: res.lowResolution };
+    } else if (t.tool === 'distance') {
+      const res = viewFromDistance(this.pixels(lv), w, h, t.widthCm, t.distance);
+      rgba = res.rgba;
+      stats.distance = { blurPx: res.blurPx, iou: res.iou, figure: res.figure };
+    } else if (t.tool === 'spread') {
+      const res = spreadPreview(this.pixels(lv), w, h, t.widthCm, t.spread);
+      rgba = res.rgba;
+      stats.spread = { spreadPx: res.spreadPx, blurPx: res.blurPx };
+    } else rgba = skinPreview(this.pixels(lv), w, h);
+    this.progress?.(1, 'done');
+    const ms = now() - t0;
+    stats.ms = round1(ms);
+    this.tat = { key, rgba, stats, ink };
+    return { rgba, key, ms };
   }
 
   /** Makes the GPU result texture hold the state's Simplify / Drawing; returns compute and upload ms. */
@@ -247,7 +305,8 @@ class Engine {
       if (state.view === 'simplify' && this.simplified) {
         const s = this.simplified.res;
         stats.simplify = { regions: s.regions, colors: s.colors, inkShare: Math.round(s.inkShare * 1e4) / 1e4, ms: s.ms };
-      } else if (this.drawn) stats.drawing = { inkShare: Math.round(this.drawn.res.inkShare * 1e4) / 1e4 };
+      } else if (state.view === 'tattoo' && this.tat) stats.tattoo = this.tat.stats;
+      else if (this.drawn) stats.drawing = { inkShare: Math.round(this.drawn.res.inkShare * 1e4) / 1e4 };
     }
     const t2 = now();
     r.renderScreen(plan, state.smoothing, this.rect(), this.screen.bg);
@@ -339,6 +398,20 @@ class Engine {
     return c.convertToBlob({ type: 'image/png' });
   }
 
+  /**
+   * Stencil PDF at 1:1 from the line check's ink mask (Тату → Линии): A4 or larger, a 10 mm
+   * scale bar, mirrored on request.
+   */
+  async exportStencil(): Promise<StencilExport> {
+    const r = this.renderer, t = this.state.tattoo;
+    if (this.state.view !== 'tattoo' || t.tool !== 'lines' || !this.tat?.ink) throw new Error('трафарет делается во вкладке Тату → Линии');
+    const t0 = now(), ink = this.tat.ink, gray = new Uint8Array(ink.length);
+    for (let i = 0; i < ink.length; i++) gray[i] = ink[i] ? 0 : 255;
+    const s = await stencilPdf(gray, r.w, r.h, { widthCm: t.widthCm, mirror: t.lines.mirror, label: 'Vishar Color Study stencil' });
+    const res: StencilExport = { pdf: s.pdf, pageMm: s.pageMm, designMm: s.designMm, ms: round1(now() - t0) };
+    return Comlink.transfer(res, [s.pdf.buffer]);
+  }
+
   /** Working copy rendered with the current view at work size, as PNG. */
   async exportWork(): Promise<Blob> {
     const r = this.renderer;
@@ -381,6 +454,8 @@ class Engine {
       ['simplify posterize, 4 цвета, тёмные элементы', { ...base, view: 'simplify', simplify: { ...base.simplify, mode: 'posterize', paletteLimit: 4, keepDark: true } }],
       ['drawing sketch', { ...base, view: 'drawing' }],
       ['drawing contours stroke 3 invert', { ...base, view: 'drawing', smoothing: 1, drawing: { mode: 'contours', line: 60, stroke: 3, invert: true } }],
+      ['тату: контраст', { ...base, view: 'tattoo' }],
+      ['тату: линии 0,5 мм', { ...base, view: 'tattoo', tattoo: { ...base.tattoo, tool: 'lines' } }],
     ];
     for (const [name, url] of Object.entries(fixtures)) {
       const blob = await (await fetch(url)).blob();

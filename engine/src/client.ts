@@ -4,7 +4,7 @@
 import * as Comlink from 'comlink';
 import type { ViewState } from './core/view';
 import type { PaletteParams } from './core/palette';
-import type { Caps, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from './types';
+import type { Caps, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, StencilExport, SvgExport, ViewResult } from './types';
 import type { EngineApi } from './worker/engine.worker';
 
 type Resolver = { ok: (r: ViewResult) => void; fail: (e: unknown) => void };
@@ -115,6 +115,12 @@ export class EngineClient {
   async exportInkPng(): Promise<Blob> {
     await this.settled();
     return this.api.exportInkPng();
+  }
+
+  /** Stencil PDF 1:1 from Тату → Линии. */
+  async exportStencil(): Promise<StencilExport> {
+    await this.settled();
+    return this.api.exportStencil();
   }
 
   async exportWork(): Promise<Blob> {

@@ -67,6 +67,19 @@ try {
   const svg = await page.evaluate(() => window.__engineDev.svg());
   console.log(`svg: ${svg.loops} outlines, ${svg.points} points, ${(svg.bytes / 1024).toFixed(0)} KB, ${svg.ms} ms`);
   if (!svg.head.includes('<svg') || !svg.loops) failed = true;
+
+  // Stage 4: every tattoo tool on the flash fixture, then the stencil PDF.
+  await page.evaluate(() => window.__engineDev.open('fixtures/flash_1k.png'));
+  for (const tool of ['contrast', 'lines', 'distance', 'spread', 'skin']) {
+    const r = await page.evaluate((t) => window.__engineDev.tattoo(t), tool);
+    const st = r.lastFrame.stats.tattoo;
+    console.log(`tattoo ${tool}: compute ${r.lastFrame.timings.computeMs} ms, ${JSON.stringify({ ...st, contrast: st.contrast && { weakPairs: st.contrast.weakPairs, weakShare: st.contrast.weakShare, colors: st.contrast.colors } })}`);
+    if (!st || st.tool !== tool) failed = true;
+  }
+  await page.evaluate(() => window.__engineDev.tattoo('lines'));
+  const pdf = await page.evaluate(() => window.__engineDev.stencil());
+  console.log(`stencil: ${pdf.head.trim()} ${pdf.designMm.join('×')} mm on ${pdf.pageMm.join('×')} mm, ${(pdf.bytes / 1024).toFixed(0)} KB, ${pdf.ms} ms`);
+  if (!pdf.head.startsWith('%PDF')) failed = true;
   await page.screenshot({ path: process.env.SHOT || 'dist/screenshot.png', fullPage: true });
 } finally {
   await browser.close();
