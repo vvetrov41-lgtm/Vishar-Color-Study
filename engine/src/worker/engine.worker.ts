@@ -11,7 +11,7 @@ import { simplify, type SimplifyParams, type SimplifyResult } from '../core/simp
 import { maskToSvg } from '../core/vector';
 import { contrastMap, contrastSimplify } from '../core/contrast';
 import { stencilPdf } from '../core/pdf';
-import { greyTones, pigmentMap, pigmentSimplify } from '../core/pigments';
+import { focusOn, greyTones, PHOTO_SHIFT, pigmentMap, pigmentSimplify } from '../core/pigments';
 import { checkLines, designInk, skinPreview, spreadPreview, viewFromDistance } from '../core/tattoo';
 import { ORIGINAL_VALUES_9, levelAgreement } from '../core/compat';
 import { histogramsFromLab8, type Histograms } from '../core/histogram';
@@ -51,6 +51,8 @@ class Engine {
   // Tattoo tools: the current result, plus the simplification the contrast map is built from.
   private tat: { key: string; rgba: Uint8ClampedArray; stats: TattooStats; ink?: Uint8Array } | null = null;
   private tatSeg: { key: string; res: SimplifyResult } | null = null;
+  /** Pigments before a focus is applied: the per-pixel index lets a tap find its pigment. */
+  private pig: { key: string; rgba: Uint8ClampedArray; index: Int8Array; stats: NonNullable<TattooStats['pigments']>; ms: number } | null = null;
   private uploaded = '';
   private progress: ((share: number, stage: string) => void) | null = null;
 
@@ -62,7 +64,7 @@ class Engine {
     this.dHist = null;
     this.simplified = this.drawn = null;
     this.drawCache.clear();
-    this.tat = this.tatSeg = null;
+    this.tat = this.tatSeg = this.pig = null;
     this.uploaded = '';
   }
 
@@ -109,7 +111,7 @@ class Engine {
   /** Current tattoo tool (plan 5.1–5.4); only the parameters of that tool are in the key. */
   private tattoo(state: ViewState): { rgba: Uint8ClampedArray; key: string; ms: number } {
     const r = this.renderer, lv = state.smoothing, t = state.tattoo, w = r.w, h = r.h, n = w * h;
-    const own = t.tool === 'contrast' ? t.contrast : t.tool === 'pigments' ? (t.pigments.mode === 'bg' ? [t.pigments.mode, t.pigments.details, t.pigments.tonesL] : { ...t.pigments, series: 0, tonesL: 0 }) : t.tool === 'lines' ? [t.lines, t.lines.source === 'drawing' ? state.drawing : null]
+    const own = t.tool === 'contrast' ? t.contrast : t.tool === 'pigments' ? t.pigments : t.tool === 'lines' ? [t.lines, t.lines.source === 'drawing' ? state.drawing : null]
       : t.tool === 'distance' ? t.distance : t.tool === 'spread' ? t.spread : null;
     const key = `t:${lv}:${t.tool}:${t.widthCm}:${JSON.stringify(own)}`;
     if (this.tat?.key === key) return { rgba: this.tat.rgba, key, ms: 0 };
@@ -126,16 +128,21 @@ class Engine {
       return this.tatSeg.res;
     };
     if (t.tool === 'pigments') {
-      const seg = segment(pigmentSimplify(t.pigments)), pg = t.pigments;
-      if (pg.mode === 'bg') {
-        const res = greyTones(seg.rgba, w, h, pg.tonesL);
-        rgba = res.rgba;
-        stats.pigments = { tones: [...pg.tonesL], shares: res.shares, skinShare: res.skinShare, colors: seg.colors };
-      } else {
-        const res = pigmentMap(seg.rgba, w, h, pg);
-        rgba = res.rgba;
-        stats.pigments = { inks: res.inks, skinShare: res.skinShare, misses: res.misses, meanDE: res.meanDE, colors: seg.colors };
+      const pg = t.pigments, { focus: _f, ...base } = pg, pkey = `${lv}:${JSON.stringify(pg.mode === 'bg' ? [base.source, base.details, base.tonesL] : { ...base, series: 0, tonesL: 0 })}`;
+      if (this.pig?.key !== pkey) {
+        const tp = now(), photo = pg.source === 'photo';
+        const src = photo ? this.pixels(lv) : segment(pigmentSimplify(pg)).rgba, shift = photo ? PHOTO_SHIFT : 0;
+        const colors = photo ? 0 : this.tatSeg!.res.colors;
+        if (pg.mode === 'bg') {
+          const res = greyTones(src, w, h, pg.tonesL, shift);
+          this.pig = { key: pkey, rgba: res.rgba, index: res.index, stats: { tones: [...pg.tonesL], shares: res.shares, skinShare: res.skinShare, colors }, ms: now() - tp };
+        } else {
+          const res = pigmentMap(src, w, h, pg, shift);
+          this.pig = { key: pkey, rgba: res.rgba, index: res.index, stats: { inks: res.inks, skinShare: res.skinShare, misses: res.misses, meanDE: res.meanDE, colors }, ms: now() - tp };
+        }
       }
+      rgba = pg.focus === -1 ? this.pig.rgba : focusOn(this.pig.rgba, this.pig.index, pg.focus);
+      stats.pigments = this.pig.stats;
     } else if (t.tool === 'contrast') {
       segment(contrastSimplify(t.contrast));
       const c = contrastMap(this.tatSeg!.res.rgba, w, h, t.contrast);
@@ -364,6 +371,14 @@ class Engine {
     const i = (Math.floor(v * r.h) * r.w + Math.floor(u * r.w)) * 4;
     const tone = this.plan.scale === 1 ? a.lab8[i + 3] : a.lab8[i];
     return levelOf(tone, this.plan.thresholds);
+  }
+
+  /** Pigment or tone under (u, v), 0..1 of the working copy: its index, −2 = skin, null = none shown. */
+  pickPigment(u: number, v: number): number | null {
+    const r = this.renderer;
+    if (u < 0 || v < 0 || u >= 1 || v >= 1 || this.state.view !== 'tattoo' || this.state.tattoo.tool !== 'pigments' || !this.pig) return null;
+    const k = this.pig.index[Math.floor(v * r.h) * r.w + Math.floor(u * r.w)];
+    return k < 0 ? -2 : k;
   }
 
   /** Palette of the unsmoothed working copy. */
