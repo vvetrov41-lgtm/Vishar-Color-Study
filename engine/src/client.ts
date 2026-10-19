@@ -128,6 +128,12 @@ export class EngineClient {
     return this.api.exportStencil();
   }
 
+  /** Design calibrated for the chosen skin tone, without the skin. */
+  async exportCalibrated(): Promise<Blob> {
+    await this.settled();
+    return this.api.exportCalibrated();
+  }
+
   async exportWork(): Promise<Blob> {
     await this.settled();
     return this.api.exportWork();

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { srgbToLab } from '../src/core/color';
+import { labToSrgb, srgbToLab } from '../src/core/color';
+import { deltaE2000 } from '../src/core/colorinfo';
+import { CalLut, calibrateImage, calibrateLab, DEFAULT_SKIN, NEUTRAL, OWN_TONE, skinView, tileAt } from '../src/core/skin';
 import { contrastMap, DEFAULT_CONTRAST, MARK_A } from '../src/core/contrast';
 import { stencilPdf } from '../src/core/pdf';
 import { DEFAULT_PIGMENTS, focusOn, GREY_SERIES, greyTones, INK_BRANDS, INKS, PHOTO_SHIFT, pigmentMap } from '../src/core/pigments';
@@ -195,5 +197,76 @@ describe('stencil pdf', () => {
   it('a design wider than A4 gets a larger page', async () => {
     const { pageMm } = await stencilPdf(new Uint8Array(100 * 50).fill(255), 100, 50, { widthCm: 30, mirror: false });
     expect(pageMm[0]).toBe(320);
+  });
+});
+
+describe('skin calibration', () => {
+  it('neutral calibration keeps the design', () => {
+    const w = 64, h = 64, px = paint(w, h, (x, y) => [x * 4, y * 4, (x * y) % 256]);
+    const r = calibrateImage(px, w * h, NEUTRAL);
+    let max = 0;
+    for (let i = 0; i < w * h * 4; i += 4) for (let c = 0; c < 3; c++) max = Math.max(max, Math.abs(r.px[i + c] - px[i + c]));
+    expect(max).toBeLessThanOrEqual(2);
+  });
+
+  it('the 33³ table matches the exact calibration within 1.5 ΔE on random colours', () => {
+    const cal = { brightness: -15, contrast: 140, shadows: -20, highlights: -25, saturation: 150, warmth: 10 }, lut = new CalLut(cal), v = new Float32Array(7);
+    let seed = 7, worst = 0;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % 256);
+    for (let k = 0; k < 3000; k++) {
+      const r = rnd(), g = rnd(), b = rnd();
+      lut.map(r, g, b, v);
+      const exact = srgbToLab(...labToSrgb(...calibrateLab(...srgbToLab(r, g, b), cal)));
+      const got = srgbToLab(Math.round(v[0]), Math.round(v[1]), Math.round(v[2]));
+      worst = Math.max(worst, deltaE2000(exact, got));
+    }
+    expect(worst).toBeLessThan(1.5);
+  });
+
+  it('contrast and lower highlights move light colours away from white, black stays black', () => {
+    const cal = { ...NEUTRAL, contrast: 130, highlights: -30 };
+    const [L] = calibrateLab(80, 0, 0, cal);
+    expect(L).toBeLessThan(80);
+    expect(calibrateLab(0, 0, 0, cal)[0]).toBe(0);
+    expect(calibrateLab(100, 0, 0, { ...NEUTRAL, highlights: -30 })[0]).toBe(100);
+  });
+
+  it('lab8 of the calibrated version matches its pixels', () => {
+    const w = 40, h = 40, px = paint(w, h, (x, y) => [x * 6, 255 - y * 6, 120]);
+    const r = calibrateImage(px, w * h, { ...NEUTRAL, saturation: 160, contrast: 120 });
+    let max = 0;
+    for (let i = 0; i < w * h * 4; i += 4) max = Math.max(max, Math.abs(r.lab8[i] / 2.55 - srgbToLab(r.px[i], r.px[i + 1], r.px[i + 2])[0]));
+    expect(max).toBeLessThan(1.5);
+  });
+
+  it('one tone: paper takes the chosen skin, each tone keeps its own calibration', () => {
+    const w = 60, h = 40, px = paint(w, h, () => [255, 255, 255]);
+    const p = { ...DEFAULT_SKIN, tone: 5, cal: DEFAULT_SKIN.cal.map((c) => ({ ...c })) };
+    let out = skinView(px, w, h, p);
+    expect(Math.abs(out[0] - SKIN_TONES[5][0])).toBeLessThanOrEqual(1);
+    p.cal[5].brightness = -40;
+    out = skinView(px, w, h, p);
+    // White is not moved by brightness: still bare skin.
+    expect(Math.abs(out[0] - SKIN_TONES[5][0])).toBeLessThanOrEqual(1);
+    expect(p.cal[0]).toEqual(NEUTRAL);
+    p.tone = OWN_TONE; p.own = [100, 60, 40];
+    out = skinView(px, w, h, p);
+    expect(Array.from(out.slice(0, 3))).toEqual([100, 60, 40]);
+  });
+
+  it('tile under a tap', () => {
+    expect(tileAt(0.1, 0.1)).toBe(0);
+    expect(tileAt(0.9, 0.9)).toBe(5);
+    expect(tileAt(0.5, 0.7)).toBe(4);
+  });
+
+  it('calibrates a 1600×1200 design fast enough for a slider', () => {
+    const w = 1600, h = 1200, px = paint(w, h, (x, y) => [x % 256, y % 256, (x + y) % 256]);
+    const t0 = performance.now();
+    calibrateImage(px, w * h, { ...NEUTRAL, contrast: 130 });
+    const ms = performance.now() - t0, t1 = performance.now();
+    calibrateImage(px, w * h, { ...NEUTRAL, contrast: 130 }, false);
+    console.log(`calibrate 1600×1200: with lab8 ${ms.toFixed(0)} ms, sRGB only ${(performance.now() - t1).toFixed(0)} ms`);
+    expect(ms).toBeLessThan(2000);
   });
 });

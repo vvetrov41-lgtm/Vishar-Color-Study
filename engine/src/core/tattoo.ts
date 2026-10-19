@@ -4,11 +4,12 @@
 //  - lines:    line thickness and gaps in mm at the design's physical size;
 //  - distance: the design seen from a distance (1′ visual acuity), Notan IoU, figure/ground;
 //  - spread:   possible ink spread (dark grows, contrast drops, slight blur);
-//  - skin:     the design multiplied onto six skin tones (Fitzpatrick I–VI).
+//  - skin:     the design on a skin tone, calibrated per tone (see skin.ts).
 
 import { enc, SRGB_TO_LINEAR, srgbToLab } from './color';
 import { DEFAULT_CONTRAST, type ContrastParams } from './contrast';
 import { DEFAULT_PIGMENTS, type PigmentParams } from './pigments';
+import { DEFAULT_SKIN, type SkinParams } from './skin';
 import { gauss } from './drawing';
 import { components } from './simplify';
 
@@ -51,6 +52,7 @@ export interface TattooParams {
   lines: LinesParams;
   distance: DistanceParams;
   spread: SpreadParams;
+  skin: SkinParams;
 }
 
 export const DEFAULT_TATTOO: TattooParams = {
@@ -61,12 +63,10 @@ export const DEFAULT_TATTOO: TattooParams = {
   lines: { source: 'design', inkL: 35, minLineMm: 0.5, minGapMm: 1, mirror: false },
   distance: { distanceM: 2, arcmin: 1 },
   spread: { spreadMm: 0.2, contrast: 0.85, blurMm: 0.1 },
+  skin: DEFAULT_SKIN,
 };
 
-/** Fitzpatrick I–VI, approximate sRGB of each skin type (orientation only). */
-export const SKIN_TONES: Array<[number, number, number]> = [
-  [243, 214, 193], [232, 188, 154], [208, 155, 118], [168, 114, 79], [122, 75, 48], [74, 44, 29],
-];
+export { SKIN_TONES, skinPreview } from './skin';
 
 export const pxPerMm = (w: number, widthCm: number) => w / (Math.max(0.1, widthCm) * 10);
 
@@ -307,37 +307,4 @@ export function spreadPreview(px: ArrayLike<number>, w: number, h: number, width
     return gauss(e, w, h, sigma);
   });
   return { rgba: toRgba(planes, n), spreadPx: r, blurPx: Math.round(sigma * 100) / 100 };
-}
-
-// ---------- skin ----------
-
-/**
- * Six tiles (3 × 2, Fitzpatrick I–VI left to right, top to bottom): the design multiplied
- * onto each skin tone in linear light, so white pigment all but disappears on dark skin.
- */
-export function skinPreview(px: ArrayLike<number>, w: number, h: number): Uint8ClampedArray {
-  const out = new Uint8ClampedArray(w * h * 4).fill(255);
-  const tw = Math.floor(w / 3), th = Math.floor(h / 2), pad = Math.round(Math.min(tw, th) * 0.04);
-  const s = Math.min((tw - 2 * pad) / w, (th - 2 * pad) / h), dw = Math.max(1, Math.floor(w * s)), dh = Math.max(1, Math.floor(h * s));
-  for (let t = 0; t < 6; t++) {
-    const ox = (t % 3) * tw, oy = Math.floor(t / 3) * th, skin = SKIN_TONES[t].map((v) => SRGB_TO_LINEAR[v]);
-    const ix = ox + Math.floor((tw - dw) / 2), iy = oy + Math.floor((th - dh) / 2);
-    for (let y = oy; y < oy + th; y++) for (let x = ox; x < ox + tw; x++) {
-      const j = (y * w + x) * 4, u = x - ix, v = y - iy;
-      let d = [1, 1, 1];
-      if (u >= 0 && v >= 0 && u < dw && v < dh) {
-        // Box average of the source pixels this tile pixel covers.
-        const x0 = Math.floor(u / s), x1 = Math.max(x0 + 1, Math.floor((u + 1) / s)), y0 = Math.floor(v / s), y1 = Math.max(y0 + 1, Math.floor((v + 1) / s));
-        const acc = [0, 0, 0];
-        let k = 0;
-        for (let yy = y0; yy < Math.min(h, y1); yy++) for (let xx = x0; xx < Math.min(w, x1); xx++) {
-          const q = (yy * w + xx) * 4;
-          acc[0] += SRGB_TO_LINEAR[px[q]]; acc[1] += SRGB_TO_LINEAR[px[q + 1]]; acc[2] += SRGB_TO_LINEAR[px[q + 2]]; k++;
-        }
-        if (k) d = acc.map((a) => a / k);
-      }
-      out[j] = enc(skin[0] * d[0]); out[j + 1] = enc(skin[1] * d[1]); out[j + 2] = enc(skin[2] * d[2]);
-    }
-  }
-  return out;
 }

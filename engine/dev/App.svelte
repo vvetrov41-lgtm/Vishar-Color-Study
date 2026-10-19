@@ -8,6 +8,7 @@
   import { DEFAULT_PALETTE, type Swatch } from '../src/core/palette';
   import { DEFAULT_VIEW, type ViewState } from '../src/core/view';
   import { DEFAULT_TATTOO, SKIN_TONES, type TattooTool } from '../src/core/tattoo';
+  import { NEUTRAL, OWN_TONE, skinRgb, tileAt, type Calibration } from '../src/core/skin';
   import { evenTones, GREY_SERIES, INK_BRANDS } from '../src/core/pigments';
   import { HINTS } from './hints';
   import type { OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
@@ -33,6 +34,12 @@
   const TABS = [['original', 'Оригинал'], ['palette', 'Палитра'], ['values', 'Values'], ['notan', 'Notan'], ['temperature', 'Temp'], ['highlight', 'Highlight'], ['simplify', 'Simplify'], ['drawing', 'Drawing'], ['tattoo', 'Тату']] as const;
   const TOOLS: Array<[TattooTool, string]> = [['contrast', 'Контраст'], ['pigments', 'Пигменты'], ['lines', 'Линии'], ['distance', 'Расстояние'], ['spread', 'Расплывание'], ['skin', 'Кожа']];
   const SKIN_NAMES = ['I', 'II', 'III', 'IV', 'V', 'VI'];
+  const toneName = (k: number) => (k === OWN_TONE ? 'свой тон' : `тон ${SKIN_NAMES[k]}`);
+  // Calibration sliders of the skin tool: key, label, min, max, unit.
+  const CAL: Array<[keyof Calibration, string, number, number, string]> = [
+    ['brightness', 'Яркость', -40, 40, ''], ['contrast', 'Контраст', 50, 200, '%'], ['shadows', 'Тени', -40, 40, ''],
+    ['highlights', 'Света', -40, 40, ''], ['saturation', 'Насыщенность', 0, 200, '%'], ['warmth', 'Тепло', -30, 30, ''],
+  ];
   const SIZES = [1, 3, 5, 11];
   const KINDS = [['dominant', 'Dominant'], ['range', 'Range'], ['accents', 'Accents']] as const;
   type Kind = (typeof KINDS)[number][0];
@@ -266,6 +273,13 @@
 
   async function tap(e: PointerEvent) {
     if (!engine) return;
+    // Тату → Кожа, all tones: a tap on a tile opens that tone.
+    if (vs.view === 'tattoo' && vs.tattoo.tool === 'skin' && vs.tattoo.skin.show === 'all' && last) {
+      const r = canvas.getBoundingClientRect();
+      const u = ((e.clientX - r.left) / r.width - last.rect.x) / last.rect.w, v = ((e.clientY - r.top) / r.height - last.rect.y) / last.rect.h;
+      if (u >= 0 && u <= 1 && v >= 0 && v <= 1) vs.tattoo.skin = { ...vs.tattoo.skin, tone: tileAt(u, v), show: 'one' };
+      return;
+    }
     // In Highlight a tap (or drag) on the photo picks the colour to find.
     if (tool === 'pipette') {
       canvas.setPointerCapture(e.pointerId);
@@ -557,6 +571,15 @@
     }
   }
 
+  async function exportCalibrated() {
+    if (!engine) return;
+    try {
+      await shareFile(await engine.exportCalibrated(), `vishar-skin-${vs.tattoo.skin.tone === OWN_TONE ? 'own' : SKIN_NAMES[vs.tattoo.skin.tone]}.png`);
+    } catch (e) {
+      error = String((e as Error)?.message ?? e);
+    }
+  }
+
   async function exportPng() {
     if (!engine) return;
     const blob = await engine.exportWork();
@@ -749,6 +772,9 @@
         {#each TOOLS as [k, label]}<button class:active={t.tool === k} onclick={() => { vs.tattoo.tool = k; vs.tattoo.pigments.focus = -1; }}>{label}</button>{/each}
         {@render i('tat.tool')}
       </div>
+      {#if t.tool !== 'skin' && t.skin.use}
+        <div class="row"><span class="muted">Работаешь с версией для кожи: {toneName(t.skin.tone)} <span class="dot" style="background: rgb({skinRgb(t.skin).join(',')})"></span></span><button onclick={() => (vs.tattoo.skin.use = false)}>Исходный эскиз</button></div>
+      {/if}
       {#if t.tool !== 'skin' && t.tool !== 'pigments'}
         <label class="row"><span>Ширина тату, см {@render i('tat.width')}</span> <b>{t.widthCm}</b><input type="range" min="2" max="40" step="0.5" bind:value={vs.tattoo.widthCm} /></label>
       {/if}
@@ -835,8 +861,44 @@
         <label class="row"><span>Размытие, мм {@render i('spr.blur')}</span> <b>{t.spread.blurMm}</b><input type="range" min="0" max="0.5" step="0.05" bind:value={vs.tattoo.spread.blurMm} /></label>
         <p class="muted">Так может снизиться читаемость; реальный результат зависит от кожи и техники.</p>
       {:else}
-        <p class="muted">Своих настроек нет. Эскиз поверх тонов кожи I–VI (шкала Фицпатрика, ориентировочно): слева направо, сверху вниз. Белый пигмент на тёмной коже почти не виден.</p>
-        <div class="row">{#each SKIN_TONES as c, i}<span class="dot" style="background: rgb({c.join(',')})"></span><span class="muted">{SKIN_NAMES[i]}</span>{/each}</div>
+        {@const sk = t.skin}
+        <div class="row">
+          <span>Тон кожи {@render i('skin.tone')}</span>
+          <div class="seg">
+            {#each SKIN_TONES as c, k}
+              <button class="tone" class:active={sk.tone === k} style="background: rgb({c.join(',')}); color: {k < 3 ? '#000' : '#fff'}" onclick={() => (vs.tattoo.skin.tone = k)}>{SKIN_NAMES[k]}</button>
+            {/each}
+            <label class="tone" class:active={sk.tone === OWN_TONE} style="background: {hex(sk.own)}">
+              <input type="color" value={hex(sk.own).toLowerCase()} oninput={(e) => { const v = parseInt((e.currentTarget as HTMLInputElement).value.slice(1), 16); vs.tattoo.skin = { ...vs.tattoo.skin, own: [v >> 16, (v >> 8) & 255, v & 255], tone: OWN_TONE }; }} />свой
+            </label>
+          </div>
+        </div>
+        <div class="row">
+          <span>Показать {@render i('skin.show')}</span>
+          <div class="seg">
+            {#each [['one', 'на коже'], ['compare', 'до / после'], ['all', 'все I–VI']] as [k, label]}
+              <button class:active={sk.show === k} onclick={() => (vs.tattoo.skin.show = k as typeof sk.show)}>{label}</button>
+            {/each}
+          </div>
+        </div>
+        {#if sk.show === 'all'}
+          <p class="muted">Каждый тон со своей калибровкой. Тапни по плитке, чтобы открыть и настроить этот тон.</p>
+        {:else}
+          <p class="muted">Калибровка для: {toneName(sk.tone)} {@render i('skin.cal')}</p>
+          {#each CAL as [k, label, min, max, unit]}
+            <label class="row"><span>{label} {@render i(`skin.${k}`)}</span> <b>{sk.cal[sk.tone][k]}{unit}</b><input type="range" {min} {max} bind:value={vs.tattoo.skin.cal[sk.tone][k]} /></label>
+          {/each}
+          <div class="row">
+            <button onclick={() => (vs.tattoo.skin.cal[sk.tone] = { ...NEUTRAL })}>Сбросить калибровку</button>
+            <button onclick={exportCalibrated} disabled={!opened}>PNG версии</button>
+            {@render i('skin.png')}
+          </div>
+          <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.skin.use} /> Работать с этой версией {@render i('skin.use')}</label>
+          {#if sk.use}
+            <div class="row"><button class="primary" onclick={() => (vs.tattoo.tool = 'pigments')}>Подобрать пигменты</button></div>
+          {/if}
+        {/if}
+        <p class="muted">Тоны I–VI ориентировочные (шкала Фицпатрика). Кожа просвечивает сквозь краску, поэтому белое на тёмной коже почти пропадает. Это прикидка, не прогноз заживления.</p>
       {/if}
     {/if}
 
@@ -867,7 +929,7 @@
           {#each pr.inks as k, j}
             <button class="inkrow" class:on={vs.tattoo.pigments.focus === j} onclick={() => focusPigment(j)}><span class="dot" style="background: {k.hex}"></span><span>{k.name} <span class="muted">· {k.line} · {Math.round(k.share * 100)}%{k.conf === 'm' ? '' : ' · цвет по фото флакона'}</span></span></button>
           {/each}
-          <button class="inkrow" class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)}><span class="dot" style="background: #F5F3EF"></span><span>Кожа без краски <span class="muted">· {Math.round(pr.skinShare * 100)}%</span></span></button>
+          <button class="inkrow" class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)}><span class="dot" style="background: {vs.tattoo.skin.use ? `rgb(${skinRgb(vs.tattoo.skin).join(',')})` : '#F5F3EF'}"></span><span>Кожа без краски <span class="muted">· {Math.round(pr.skinShare * 100)}%</span></span></button>
         </div>
         {#if pr.misses.length}
           <p class="muted">Не попадают ни в одну краску ближе ΔE {vs.tattoo.pigments.farDE}:</p>
@@ -1223,6 +1285,9 @@
   .swatches small { font-weight: 400; font-size: 10px; }
   .colorhead { display: flex; gap: 12px; align-items: flex-start; }
   .big { width: 64px; height: 64px; border-radius: 10px; border: 1px solid var(--line); flex: none; }
+  .tone { min-width: 40px; padding: 6px 8px; border: 2px solid transparent; border-radius: 8px; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+  .tone.active { border-color: var(--fg); }
+  .tone input[type='color'] { width: 22px; height: 22px; padding: 0; border: none; background: none; }
   .dot { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line); display: inline-block; flex: none; }
   .codes { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px; margin: 8px 0; }
   .codes button { text-align: left; font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
