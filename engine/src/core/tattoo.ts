@@ -8,10 +8,11 @@
 
 import { enc, SRGB_TO_LINEAR, srgbToLab } from './color';
 import { DEFAULT_CONTRAST, type ContrastParams } from './contrast';
+import { DEFAULT_PIGMENTS, type PigmentParams } from './pigments';
 import { gauss } from './drawing';
 import { components } from './simplify';
 
-export type TattooTool = 'contrast' | 'lines' | 'distance' | 'spread' | 'skin';
+export type TattooTool = 'contrast' | 'pigments' | 'lines' | 'distance' | 'spread' | 'skin';
 
 export interface LinesParams {
   /** design: dark pixels of the design itself (L* below inkL); drawing: the Drawing result. */
@@ -46,6 +47,7 @@ export interface TattooParams {
   /** Physical width of the design on skin, cm: everything in mm is measured against it. */
   widthCm: number;
   contrast: ContrastParams;
+  pigments: PigmentParams;
   lines: LinesParams;
   distance: DistanceParams;
   spread: SpreadParams;
@@ -55,6 +57,7 @@ export const DEFAULT_TATTOO: TattooParams = {
   tool: 'contrast',
   widthCm: 10,
   contrast: DEFAULT_CONTRAST,
+  pigments: DEFAULT_PIGMENTS,
   lines: { source: 'design', inkL: 35, minLineMm: 0.5, minGapMm: 1, mirror: false },
   distance: { distanceM: 2, arcmin: 1 },
   spread: { spreadMm: 0.2, contrast: 0.85, blurMm: 0.1 },

@@ -7,10 +7,11 @@ import { colorInfo, type Lab } from '../core/colorinfo';
 import { deltaHistogram, matchedShare } from '../core/highlight';
 import { DrawingCache, lightness, type DrawingResult } from '../core/drawing';
 import { DEFAULT_PALETTE, extractPalette, meanRgb, sampleGrid, square, type Grid, type PaletteParams } from '../core/palette';
-import { simplify, type SimplifyResult } from '../core/simplify';
+import { simplify, type SimplifyParams, type SimplifyResult } from '../core/simplify';
 import { maskToSvg } from '../core/vector';
 import { contrastMap, contrastSimplify } from '../core/contrast';
 import { stencilPdf } from '../core/pdf';
+import { greyTones, pigmentMap, pigmentSimplify } from '../core/pigments';
 import { checkLines, designInk, skinPreview, spreadPreview, viewFromDistance } from '../core/tattoo';
 import { ORIGINAL_VALUES_9, levelAgreement } from '../core/compat';
 import { histogramsFromLab8, type Histograms } from '../core/histogram';
@@ -108,23 +109,38 @@ class Engine {
   /** Current tattoo tool (plan 5.1–5.4); only the parameters of that tool are in the key. */
   private tattoo(state: ViewState): { rgba: Uint8ClampedArray; key: string; ms: number } {
     const r = this.renderer, lv = state.smoothing, t = state.tattoo, w = r.w, h = r.h, n = w * h;
-    const own = t.tool === 'contrast' ? t.contrast : t.tool === 'lines' ? [t.lines, t.lines.source === 'drawing' ? state.drawing : null]
+    const own = t.tool === 'contrast' ? t.contrast : t.tool === 'pigments' ? (t.pigments.mode === 'bg' ? [t.pigments.mode, t.pigments.details, t.pigments.tonesL] : { ...t.pigments, series: 0, tonesL: 0 }) : t.tool === 'lines' ? [t.lines, t.lines.source === 'drawing' ? state.drawing : null]
       : t.tool === 'distance' ? t.distance : t.tool === 'spread' ? t.spread : null;
     const key = `t:${lv}:${t.tool}:${t.widthCm}:${JSON.stringify(own)}`;
     if (this.tat?.key === key) return { rgba: this.tat.rgba, key, ms: 0 };
     const t0 = now(), stats: TattooStats = { tool: t.tool, ms: 0 };
     let rgba: Uint8ClampedArray, ink: Uint8Array | undefined;
-    if (t.tool === 'contrast') {
-      const sp = contrastSimplify(t.contrast), skey = `${lv}:${JSON.stringify(sp)}`;
+    const segment = (sp: SimplifyParams): SimplifyResult => {
+      const skey = `${lv}:${JSON.stringify(sp)}`;
       if (this.tatSeg?.key !== skey) {
         const res = simplify({
           w, h, px: this.pixels(lv), lab8: this.analyzed(lv).a.lab8, px0: this.pixels(0), lab0: this.analyzed(0).a.lab8,
         }, sp, (s, stage) => this.progress?.(s * 0.9, stage));
         this.tatSeg = { key: skey, res };
       }
-      const c = contrastMap(this.tatSeg.res.rgba, w, h, t.contrast);
+      return this.tatSeg.res;
+    };
+    if (t.tool === 'pigments') {
+      const seg = segment(pigmentSimplify(t.pigments)), pg = t.pigments;
+      if (pg.mode === 'bg') {
+        const res = greyTones(seg.rgba, w, h, pg.tonesL);
+        rgba = res.rgba;
+        stats.pigments = { tones: [...pg.tonesL], shares: res.shares, skinShare: res.skinShare, colors: seg.colors };
+      } else {
+        const res = pigmentMap(seg.rgba, w, h, pg);
+        rgba = res.rgba;
+        stats.pigments = { inks: res.inks, skinShare: res.skinShare, misses: res.misses, meanDE: res.meanDE, colors: seg.colors };
+      }
+    } else if (t.tool === 'contrast') {
+      segment(contrastSimplify(t.contrast));
+      const c = contrastMap(this.tatSeg!.res.rgba, w, h, t.contrast);
       rgba = c.rgba;
-      stats.contrast = { pairs: c.pairs, weakPairs: c.weakPairs, weakShare: c.weakShare, colors: this.tatSeg.res.colors };
+      stats.contrast = { pairs: c.pairs, weakPairs: c.weakPairs, weakShare: c.weakShare, colors: this.tatSeg!.res.colors };
     } else if (t.tool === 'lines') {
       if (t.lines.source === 'drawing') {
         this.drawing(state);

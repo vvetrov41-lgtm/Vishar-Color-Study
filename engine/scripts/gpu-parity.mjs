@@ -70,10 +70,10 @@ try {
 
   // Stage 4: every tattoo tool on the flash fixture, then the stencil PDF.
   await page.evaluate(() => window.__engineDev.open('fixtures/flash_1k.png'));
-  for (const tool of ['contrast', 'lines', 'distance', 'spread', 'skin']) {
+  for (const tool of ['contrast', 'pigments', 'lines', 'distance', 'spread', 'skin']) {
     const r = await page.evaluate((t) => window.__engineDev.tattoo(t), tool);
     const st = r.lastFrame.stats.tattoo;
-    console.log(`tattoo ${tool}: compute ${r.lastFrame.timings.computeMs} ms, ${JSON.stringify({ ...st, contrast: st.contrast && { weakPairs: st.contrast.weakPairs, weakShare: st.contrast.weakShare, colors: st.contrast.colors } })}`);
+    console.log(`tattoo ${tool}: compute ${r.lastFrame.timings.computeMs} ms, ${JSON.stringify({ ...st, contrast: st.contrast && { weakPairs: st.contrast.weakPairs, weakShare: st.contrast.weakShare, colors: st.contrast.colors }, pigments: st.pigments && 'inks' in st.pigments ? { inks: st.pigments.inks.map((k) => k.name), meanDE: st.pigments.meanDE, misses: st.pigments.misses.length } : st.pigments })}`);
     if (!st || st.tool !== tool) failed = true;
   }
   await page.evaluate(() => window.__engineDev.tattoo('lines'));

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { srgbToLab } from '../src/core/color';
 import { contrastMap, DEFAULT_CONTRAST, MARK_A } from '../src/core/contrast';
 import { stencilPdf } from '../src/core/pdf';
+import { DEFAULT_PIGMENTS, GREY_SERIES, greyTones, INK_BRANDS, INKS, pigmentMap } from '../src/core/pigments';
 import {
   checkLines, DEFAULT_TATTOO, distanceTo, narrowParts, SKIN_TONES, skinPreview, spreadPreview, viewBlurPx, viewFromDistance,
 } from '../src/core/tattoo';
@@ -121,6 +122,42 @@ describe('readability', () => {
     expect(Math.abs(out[j] - SKIN_TONES[5][0])).toBeLessThanOrEqual(1);
     const k = (cy * w + 2 * tw + 70) * 4;
     expect(out[k]).toBe(0);
+  });
+});
+
+describe('pigments', () => {
+  it('loads the catalogue', () => {
+    expect(INKS.length).toBeGreaterThan(1500);
+    expect(INK_BRANDS).toContain('Radiant Colors');
+    expect(GREY_SERIES.length).toBeGreaterThan(20);
+  });
+
+  it('paints each colour with the nearest of a few pigments and leaves paper as skin', () => {
+    // A Radiant swatch, a colour no ink is near (pure #00FF00 is far from most inks), and paper.
+    const ink = INKS.find((i) => i.brand === 'Radiant Colors' && i.conf === 'm')!;
+    const v = parseInt(ink.hex.slice(1), 16), c = [v >> 16, (v >> 8) & 255, v & 255] as const;
+    const w = 90, h = 40, px = paint(w, h, (x) => (x < 30 ? c : x < 60 ? [255, 255, 255] : [20, 20, 20]));
+    const r = pigmentMap(px, w, h, { ...DEFAULT_PIGMENTS, brand: 'Radiant Colors', maxInks: 2 });
+    expect(r.inks.length).toBeLessThanOrEqual(2);
+    const at = (x: number) => '#' + [...r.rgba.subarray((20 * w + x) * 4, (20 * w + x) * 4 + 3)].map((u) => u.toString(16).padStart(2, '0')).join('').toUpperCase();
+    expect(r.inks.some((i) => i.hex === ink.hex)).toBe(true);
+    expect(at(10)).toBe(ink.hex);
+    expect(r.skinShare).toBeCloseTo(1 / 3, 2);
+  });
+
+  it('reports a colour the brand cannot reach', () => {
+    const w = 60, h = 40, px = paint(w, h, (x) => (x < 30 ? [0, 255, 0] : [255, 255, 255]));
+    const r = pigmentMap(px, w, h, { ...DEFAULT_PIGMENTS, brand: 'Dynamic', maxInks: 3, farDE: 3 });
+    expect(r.misses.length).toBe(1);
+    expect(r.misses[0].hex).toBe('#00FF00');
+    expect(r.misses[0].nearest.length).toBeGreaterThan(0);
+  });
+
+  it('black & grey maps L* to the nearest tone, light paper stays skin', () => {
+    const w = 40, h = 10, px = paint(w, h, (x) => (x < 10 ? [0, 0, 0] : x < 20 ? [119, 119, 119] : [255, 255, 255]));
+    const r = greyTones(px, w, h, [70, 50, 12]);
+    expect(r.shares).toEqual([0, 0.25, 0.25]);
+    expect(r.skinShare).toBe(0.5);
   });
 });
 

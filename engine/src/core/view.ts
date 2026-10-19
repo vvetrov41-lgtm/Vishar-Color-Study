@@ -10,6 +10,7 @@ import type { Histograms } from './histogram';
 import { DEFAULT_NOTAN, notanThresholds, type NotanParams } from './notan';
 import { DEFAULT_SIMPLIFY, type SimplifyParams } from './simplify';
 import type { ContrastPair } from './contrast';
+import type { MissColor, UsedInk } from './pigments';
 import { DEFAULT_TATTOO, type FigureGround, type TattooParams } from './tattoo';
 import { DEFAULT_TEMPERATURE, TEMP_COOL, TEMP_WARM, tempColor, temperatureStats, type TemperatureParams } from './temperature';
 import { DEFAULT_VALUES, levelOf, levelStats, valuesThresholds, type ValuesParams } from './values';
@@ -88,6 +89,7 @@ export interface TattooStats {
   tool: TattooParams['tool'];
   ms: number;
   contrast?: { pairs: ContrastPair[]; weakPairs: number; weakShare: number; colors: number };
+  pigments?: { inks: UsedInk[]; skinShare: number; misses: MissColor[]; meanDE: number; colors: number } | { tones: number[]; shares: number[]; skinShare: number; colors: number };
   lines?: { pxPerMm: number; inkShare: number; thinShare: number; gapShare: number; lowResolution: boolean };
   distance?: { blurPx: number; iou: number; figure: FigureGround };
   spread?: { spreadPx: number; blurPx: number };
