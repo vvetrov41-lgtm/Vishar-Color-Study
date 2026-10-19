@@ -31,8 +31,9 @@ export interface ViewResult {
   stats: ViewStats;
   /** Histogram behind the current view: tone scale for Values/Notan, warmth + 128 for Temperature. */
   hist: number[];
-  /** histMs: ΔE histogram for a new Highlight target (0 when cached). */
-  timings: { analyzeMs: number; planMs: number; renderMs: number; totalMs: number; histMs: number };
+  /** histMs: ΔE histogram for a new Highlight target (0 when cached).
+   *  computeMs / uploadMs: Simplify or Drawing on the CPU and its upload (0 when cached). */
+  timings: { analyzeMs: number; planMs: number; renderMs: number; totalMs: number; histMs: number; computeMs: number; uploadMs: number };
   /** Image rect inside the canvas, 0..1 of its size: maps markers and taps. */
   rect: { x: number; y: number; w: number; h: number };
   work: { width: number; height: number };
@@ -50,6 +51,8 @@ export interface ParityCase {
   mismatch: number;
   maxDiff: number;
   pass: boolean;
+  /** Simplify / Drawing cases: CPU time to compute the result, ms. */
+  computeMs?: number;
 }
 
 export interface CompatCase {
@@ -73,6 +76,13 @@ export interface PaletteResult extends Palette {
   totalMs: number;
   readMs: number;
   gridMs: number;
+}
+
+export interface SvgExport {
+  svg: string;
+  loops: number;
+  points: number;
+  ms: number;
 }
 
 export interface PickResult {

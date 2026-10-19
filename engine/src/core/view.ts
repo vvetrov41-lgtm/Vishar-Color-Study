@@ -4,13 +4,15 @@
 
 import { labToSrgb, luma601, srgbToLab, warmth } from './color';
 import { deltaE2000 } from './colorinfo';
+import { DEFAULT_DRAWING, type DrawingParams } from './drawing';
 import { DASH, DEFAULT_HIGHLIGHT, HIGHLIGHT_MODE_CODE, type HighlightParams } from './highlight';
 import type { Histograms } from './histogram';
 import { DEFAULT_NOTAN, notanThresholds, type NotanParams } from './notan';
+import { DEFAULT_SIMPLIFY, type SimplifyParams } from './simplify';
 import { DEFAULT_TEMPERATURE, TEMP_COOL, TEMP_WARM, tempColor, temperatureStats, type TemperatureParams } from './temperature';
 import { DEFAULT_VALUES, levelOf, levelStats, valuesThresholds, type ValuesParams } from './values';
 
-export type ViewKind = 'original' | 'values' | 'notan' | 'temperature' | 'highlight';
+export type ViewKind = 'original' | 'values' | 'notan' | 'temperature' | 'highlight' | 'simplify' | 'drawing';
 export type Smoothing = 0 | 1 | 2;
 
 export interface ViewState {
@@ -21,6 +23,8 @@ export interface ViewState {
   notan: NotanParams;
   temperature: TemperatureParams;
   highlight: HighlightParams;
+  simplify: SimplifyParams;
+  drawing: DrawingParams;
 }
 
 export const DEFAULT_VIEW: ViewState = {
@@ -30,9 +34,12 @@ export const DEFAULT_VIEW: ViewState = {
   notan: DEFAULT_NOTAN,
   temperature: DEFAULT_TEMPERATURE,
   highlight: DEFAULT_HIGHLIGHT,
+  simplify: DEFAULT_SIMPLIFY,
+  drawing: DEFAULT_DRAWING,
 };
 
-export const VIEW_CODE: Record<ViewKind, number> = { original: 0, values: 1, notan: 2, temperature: 3, highlight: 4 };
+// Simplify and Drawing are computed on the CPU in the Worker; the GPU only shows the result (5).
+export const VIEW_CODE: Record<ViewKind, number> = { original: 0, values: 1, notan: 2, temperature: 3, highlight: 4, simplify: 5, drawing: 5 };
 export const TEMP_STYLE_CODE = { map: 0, shaded: 1, two: 2 } as const;
 export const MAX_LEVELS = 20;
 
@@ -66,6 +73,8 @@ export interface ViewStats {
   temperature?: { neutral: number; spread: number; warmShare: number };
   /** Filled by the worker, which holds the grid sample. */
   highlight?: { share: number };
+  simplify?: { regions: number; colors: number; inkShare: number; ms: { segment: number; merge: number; paint: number; total: number } };
+  drawing?: { inkShare: number };
 }
 
 export function planView(state: ViewState, h: Histograms): { plan: ViewPlan; stats: ViewStats } {
@@ -132,8 +141,15 @@ function renderHighlight(src: Uint8Array | Uint8ClampedArray, plan: ViewPlan, w:
   }
 }
 
-/** CPU twin of the GPU view shader; same plan in, same pixels out (within rounding). */
-export function renderReference(src: Uint8Array | Uint8ClampedArray, plan: ViewPlan, w = 0): Uint8ClampedArray {
+/**
+ * CPU twin of the GPU view shader; same plan in, same pixels out (within rounding).
+ * View 5 (Simplify, Drawing) shows a result computed on the CPU: pass it as `result`.
+ */
+export function renderReference(src: Uint8Array | Uint8ClampedArray, plan: ViewPlan, w = 0, result?: ArrayLike<number>): Uint8ClampedArray {
+  if (plan.view === 5) {
+    if (!result) throw new Error('view 5 needs the computed result');
+    return Uint8ClampedArray.from(result);
+  }
   const out = new Uint8ClampedArray(src.length);
   if (plan.view === 4) {
     renderHighlight(src, plan, w, out);

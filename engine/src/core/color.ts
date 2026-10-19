@@ -29,7 +29,8 @@ export function srgbToLab(r: number, g: number, b: number): [number, number, num
 /** Rec.601 luma on gamma-encoded values, 0..255. This is what the original app thresholds. */
 export const luma601 = (r: number, g: number, b: number) => 0.299 * r + 0.587 * g + 0.114 * b;
 
-const enc = (c: number) => {
+/** Linear RGB 0..1 → 8-bit sRGB, clipped. */
+export const enc = (c: number) => {
   const v = c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
   return Math.round(255 * Math.min(1, Math.max(0, v)));
 };

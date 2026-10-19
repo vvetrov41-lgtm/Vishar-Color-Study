@@ -5,14 +5,17 @@ import * as Comlink from 'comlink';
 import { srgbToLab, luma601 } from '../core/color';
 import { colorInfo, type Lab } from '../core/colorinfo';
 import { deltaHistogram, matchedShare } from '../core/highlight';
+import { DrawingCache, lightness, type DrawingResult } from '../core/drawing';
 import { DEFAULT_PALETTE, extractPalette, meanRgb, sampleGrid, square, type Grid, type PaletteParams } from '../core/palette';
+import { simplify, type SimplifyResult } from '../core/simplify';
+import { maskToSvg } from '../core/vector';
 import { ORIGINAL_VALUES_9, levelAgreement } from '../core/compat';
 import { histogramsFromLab8, type Histograms } from '../core/histogram';
 import { fitLongSide, HEADER_BYTES, parseImageInfo } from '../core/imageinfo';
 import { DEFAULT_VIEW, planView, renderReference, type Smoothing, type ViewPlan, type ViewState } from '../core/view';
 import { levelOf, valuesThresholds } from '../core/values';
 import { Renderer, type ScreenRect } from '../gpu/renderer';
-import type { Caps, CompatCase, OpenOptions, OpenResult, PaletteResult, ParityCase, ParityReport, PickResult, ViewResult } from '../types';
+import type { Caps, CompatCase, OpenOptions, OpenResult, PaletteResult, ParityCase, ParityReport, PickResult, SvgExport, ViewResult } from '../types';
 
 const now = () => performance.now();
 const round1 = (v: number) => Math.round(v * 10) / 10;
@@ -36,6 +39,13 @@ class Engine {
   private px = new Map<Smoothing, Uint8Array>();
   private grid = new Map<Smoothing, Grid>();
   private dHist: { key: string; h: Float64Array } | null = null;
+  // Simplify / Drawing: the last result per kind, the per-smoothing drawing caches, and the key
+  // of what is in the GPU result texture now.
+  private simplified: { key: string; res: SimplifyResult; ms: number } | null = null;
+  private drawn: { key: string; res: DrawingResult; ms: number } | null = null;
+  private drawCache = new Map<Smoothing, DrawingCache>();
+  private uploaded = '';
+  private progress: ((share: number, stage: string) => void) | null = null;
 
   private reset() {
     this.analysis.clear();
@@ -43,6 +53,54 @@ class Engine {
     this.px.clear();
     this.grid.clear();
     this.dHist = null;
+    this.simplified = this.drawn = null;
+    this.drawCache.clear();
+    this.uploaded = '';
+  }
+
+  setProgress(cb: (share: number, stage: string) => void) {
+    this.progress = cb;
+  }
+
+  /**
+   * Simplify or Drawing result for a state, computed on the CPU if the parameters changed.
+   * Returns the pixels, the key and the compute time (0 when cached).
+   */
+  private computed(state: ViewState): { rgba: Uint8ClampedArray; key: string; ms: number } {
+    const r = this.renderer, lv = state.smoothing;
+    if (state.view === 'simplify') {
+      const key = `s:${lv}:${JSON.stringify(state.simplify)}`;
+      if (this.simplified?.key !== key) {
+        const t0 = now();
+        const res = simplify({
+          w: r.w, h: r.h, px: this.pixels(lv), lab8: this.analyzed(lv).a.lab8,
+          px0: this.pixels(0), lab0: this.analyzed(0).a.lab8,
+        }, state.simplify, (s, stage) => this.progress?.(s, stage));
+        this.simplified = { key, res, ms: now() - t0 };
+        return { rgba: res.rgba, key, ms: this.simplified.ms };
+      }
+      return { rgba: this.simplified.res.rgba, key, ms: 0 };
+    }
+    const key = `d:${lv}:${JSON.stringify(state.drawing)}`;
+    if (this.drawn?.key !== key) {
+      const t0 = now();
+      let c = this.drawCache.get(lv);
+      if (!c) this.drawCache.set(lv, (c = new DrawingCache(lightness(this.analyzed(lv).a.lab8, r.w * r.h), r.w, r.h)));
+      const res = c.render(state.drawing);
+      this.drawn = { key, res, ms: now() - t0 };
+      return { rgba: res.rgba, key, ms: this.drawn.ms };
+    }
+    return { rgba: this.drawn.res.rgba, key, ms: 0 };
+  }
+
+  /** Makes the GPU result texture hold the state's Simplify / Drawing; returns compute and upload ms. */
+  private ensureResult(state: ViewState): { computeMs: number; uploadMs: number } {
+    const { rgba, key, ms } = this.computed(state);
+    if (this.uploaded === key) return { computeMs: ms, uploadMs: 0 };
+    const t0 = now();
+    this.renderer.setResult(rgba);
+    this.uploaded = key;
+    return { computeMs: ms, uploadMs: now() - t0 };
   }
 
   private pixels(level: Smoothing = 0): Uint8Array {
@@ -183,6 +241,14 @@ class Engine {
     const t1 = now();
     const { plan, stats } = planView(state, a.hist);
     this.plan = plan;
+    let computeMs = 0, uploadMs = 0;
+    if (plan.view === 5) {
+      ({ computeMs, uploadMs } = this.ensureResult(state));
+      if (state.view === 'simplify' && this.simplified) {
+        const s = this.simplified.res;
+        stats.simplify = { regions: s.regions, colors: s.colors, inkShare: Math.round(s.inkShare * 1e4) / 1e4, ms: s.ms };
+      } else if (this.drawn) stats.drawing = { inkShare: Math.round(this.drawn.res.inkShare * 1e4) / 1e4 };
+    }
     const t2 = now();
     r.renderScreen(plan, state.smoothing, this.rect(), this.screen.bg);
     r.finish();
@@ -199,7 +265,10 @@ class Engine {
     const res: ViewResult = {
       stats,
       hist: Array.from(hist),
-      timings: { analyzeMs: round1(analyzeMs), planMs: round1(t2 - t1 + t4 - t3), renderMs: round1(t3 - t2), totalMs: round1(t4 - t0), histMs: round1(histMs) },
+      timings: {
+        analyzeMs: round1(analyzeMs), planMs: round1(t2 - t1 + t4 - t3 - computeMs - uploadMs), renderMs: round1(t3 - t2), totalMs: round1(t4 - t0),
+        histMs: round1(histMs), computeMs: round1(computeMs), uploadMs: round1(uploadMs),
+      },
       rect: this.rect(),
       work: { width: r.w, height: r.h },
     };
@@ -246,6 +315,30 @@ class Engine {
     return Comlink.transfer(res, [patch.buffer]);
   }
 
+  /** Current Drawing as SVG: the ink mask (coverage > 0.5) traced into outlines. */
+  exportSvg(): SvgExport {
+    const r = this.renderer;
+    if (this.state.view !== 'drawing' || !this.drawn) throw new Error('SVG есть только у Drawing');
+    const t0 = now(), ink = this.drawn.res.ink, mask = new Uint8Array(ink.length);
+    for (let i = 0; i < ink.length; i++) mask[i] = ink[i] > 0.5 ? 1 : 0;
+    const s = maskToSvg(mask, r.w, r.h, this.state.drawing.invert);
+    return { ...s, ms: round1(now() - t0) };
+  }
+
+  /**
+   * Current Drawing as a PNG with a transparent sheet: ink is black (white when inverted) with
+   * alpha = coverage. Procreate does not import SVG; this drops onto a layer instead.
+   */
+  async exportInkPng(): Promise<Blob> {
+    const r = this.renderer;
+    if (this.state.view !== 'drawing' || !this.drawn) throw new Error('прозрачный PNG есть только у Drawing');
+    const ink = this.drawn.res.ink, v = this.state.drawing.invert ? 255 : 0, px = new Uint8ClampedArray(ink.length * 4);
+    for (let i = 0; i < ink.length; i++) { px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = v; px[i * 4 + 3] = Math.round(ink[i] * 255); }
+    const c = new OffscreenCanvas(r.w, r.h);
+    c.getContext('2d')!.putImageData(new ImageData(px, r.w, r.h), 0, 0);
+    return c.convertToBlob({ type: 'image/png' });
+  }
+
   /** Working copy rendered with the current view at work size, as PNG. */
   async exportWork(): Promise<Blob> {
     const r = this.renderer;
@@ -282,6 +375,12 @@ class Engine {
       ['highlight red ΔE 20', { ...base, view: 'highlight', highlight: { target: [45, 55, 35], tolerance: 20, mode: 'highlight' } }],
       ['highlight red ΔE 20 outline', { ...base, view: 'highlight', highlight: { target: [45, 55, 35], tolerance: 20, mode: 'outline' } }],
       ['highlight grey ΔE 8 outline', { ...base, view: 'highlight', highlight: { target: [50, 0, 0], tolerance: 8, mode: 'outline' } }],
+      // Simplify / Drawing: the CPU result vs what the GPU shows from the result texture.
+      ['simplify clustering', { ...base, view: 'simplify' }],
+      ['simplify graph', { ...base, view: 'simplify', simplify: { ...base.simplify, mode: 'graph' } }],
+      ['simplify posterize, 4 цвета, тёмные элементы', { ...base, view: 'simplify', simplify: { ...base.simplify, mode: 'posterize', paletteLimit: 4, keepDark: true } }],
+      ['drawing sketch', { ...base, view: 'drawing' }],
+      ['drawing contours stroke 3 invert', { ...base, view: 'drawing', smoothing: 1, drawing: { mode: 'contours', line: 60, stroke: 3, invert: true } }],
     ];
     for (const [name, url] of Object.entries(fixtures)) {
       const blob = await (await fetch(url)).blob();
@@ -305,7 +404,12 @@ class Engine {
       for (const [vname, state] of variants) {
         const { a: an } = this.analyzed(state.smoothing);
         const { plan } = planView(state, an.hist);
-        const gpu = r.renderPixels(plan, state.smoothing), cpu = renderReference(r.readSource(state.smoothing), plan, r.w);
+        let computeMs: number | undefined, result: Uint8ClampedArray | undefined;
+        if (plan.view === 5) {
+          computeMs = round1(this.ensureResult(state).computeMs);
+          result = this.computed(state).rgba;
+        }
+        const gpu = r.renderPixels(plan, state.smoothing), cpu = renderReference(r.readSource(state.smoothing), plan, r.w, result);
         let se = 0, bad = 0, maxDiff = 0;
         for (let j = 0; j < gpu.length; j += 4) {
           const d = Math.max(Math.abs(gpu[j] - cpu[j]), Math.abs(gpu[j + 1] - cpu[j + 1]), Math.abs(gpu[j + 2] - cpu[j + 2]));
@@ -314,7 +418,7 @@ class Engine {
           if (d) se += (srgbToLab(gpu[j], gpu[j + 1], gpu[j + 2])[0] - srgbToLab(cpu[j], cpu[j + 1], cpu[j + 2])[0]) ** 2;
         }
         const mseL = se / n, mismatch = bad / n;
-        cases.push({ fixture: name, name: vname, mseL: Math.round(mseL * 1000) / 1000, mismatch: Math.round(mismatch * 1e5) / 1e5, maxDiff, pass: mseL <= 1 && mismatch <= 0.005 });
+        cases.push({ fixture: name, name: vname, mseL: Math.round(mseL * 1000) / 1000, mismatch: Math.round(mismatch * 1e5) / 1e5, maxDiff, pass: mseL <= 1 && mismatch <= 0.005, computeMs });
       }
     }
     this.reset();

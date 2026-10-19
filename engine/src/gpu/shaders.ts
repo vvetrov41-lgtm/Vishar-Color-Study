@@ -74,7 +74,8 @@ void main() {
 export const FRAG_VIEW = `${COMMON}
 in vec2 vUv;
 uniform sampler2D uSrc;
-uniform int uView;          // 0 original, 1 values, 2 notan, 3 temperature, 4 highlight
+uniform int uView;          // 0 original, 1 values, 2 notan, 3 temperature, 4 highlight, 5 result
+uniform sampler2D uRes;     // Simplify / Drawing result, work size
 uniform int uScale;         // 0 L*·2.55, 1 luma601
 uniform float uThr[19];
 uniform int uNThr;
@@ -156,6 +157,7 @@ void main() {
   vec2 p = vec2(vUv.x, uFlip ? 1.0 - vUv.y : vUv.y);
   vec2 uv = (p - uRect.xy) / uRect.zw;
   if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) { outColor = uBg; return; }
+  if (uView == 5) { outColor = vec4(texture(uRes, uv).rgb, 1.0); return; }
   vec3 c = texture(uSrc, uv).rgb;
   vec3 o = c;
   if (uView != 0) {

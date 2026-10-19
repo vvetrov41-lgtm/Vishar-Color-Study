@@ -4,7 +4,7 @@
 import * as Comlink from 'comlink';
 import type { ViewState } from './core/view';
 import type { PaletteParams } from './core/palette';
-import type { Caps, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, ViewResult } from './types';
+import type { Caps, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from './types';
 import type { EngineApi } from './worker/engine.worker';
 
 type Resolver = { ok: (r: ViewResult) => void; fail: (e: unknown) => void };
@@ -13,6 +13,7 @@ export class EngineClient {
   private inflight = false;
   private pending: { state: ViewState; waiters: Resolver[] } | null = null;
   private bitmapCtx: ImageBitmapRenderingContext | null = null;
+  private idleWaiters: Array<() => void> = [];
 
   private constructor(
     private readonly worker: Worker,
@@ -72,7 +73,17 @@ export class EngineClient {
       const next = this.pending;
       this.pending = null;
       if (next) void this.run(next.state, next.waiters);
+      else {
+        const w = this.idleWaiters;
+        this.idleWaiters = [];
+        w.forEach((f) => f());
+      }
     }
+  }
+
+  /** Resolves once the frame in flight and any queued state have rendered. */
+  private settled(): Promise<void> {
+    return this.inflight ? new Promise((ok) => this.idleWaiters.push(ok)) : Promise.resolve();
   }
 
   pick(x: number, y: number): Promise<number> {
@@ -88,7 +99,26 @@ export class EngineClient {
     return this.api.pickColor(u, v, size);
   }
 
-  exportWork(): Promise<Blob> {
+  /** Simplify / Graph progress, 0..1, while a long computation runs in the Worker. */
+  onProgress(cb: (share: number, stage: string) => void): Promise<void> {
+    return this.api.setProgress(Comlink.proxy(cb));
+  }
+
+  /** Current Drawing as SVG (the view must be 'drawing'). */
+  async exportSvg(): Promise<SvgExport> {
+    // Exports read the Worker's current view: let the latest queued state land first.
+    await this.settled();
+    return this.api.exportSvg();
+  }
+
+  /** Current Drawing as a transparent PNG (for Procreate, which has no SVG import). */
+  async exportInkPng(): Promise<Blob> {
+    await this.settled();
+    return this.api.exportInkPng();
+  }
+
+  async exportWork(): Promise<Blob> {
+    await this.settled();
     return this.api.exportWork();
   }
 
