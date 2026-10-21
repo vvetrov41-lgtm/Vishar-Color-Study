@@ -9,6 +9,7 @@
   import { DEFAULT_VIEW, type ViewState } from '../src/core/view';
   import { DEFAULT_TATTOO, SKIN_TONES, type TattooTool } from '../src/core/tattoo';
   import { NEUTRAL, OWN_TONE, skinRgb, tileAt, type Calibration } from '../src/core/skin';
+  import { nearestPaints, paintAlternatives, parseArtCatalogue, type ArtCatalogue, type ArtPaint, type ArtSet } from '../src/core/artpaints';
   import { alternatives, evenTones, GREY_SERIES, INK_BRANDS, inkById } from '../src/core/pigments';
   import { HINTS } from './hints';
   import type { OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
@@ -106,6 +107,26 @@
     chain = next;
     palette = null; current = null; picked = null;
   }
+
+  // Art paints: the catalogue loads on demand when a paint type is chosen in the palette.
+  let artCat = $state<ArtCatalogue | null>(null);
+  let artSet = $state<ArtSet>({ type: '', brand: '', tint: false });
+  let artAlt = $state<string | null>(null);
+  let artErr = $state('');
+  async function chooseArtType(type: string) {
+    artSet = { ...artSet, type, brand: '' };
+    artAlt = null;
+    if (!type || artCat) return;
+    try {
+      const res = await fetch('art-paints.json');
+      if (!res.ok) throw new Error(`${res.status}`);
+      artCat = parseArtCatalogue(await res.json());
+    } catch (e) {
+      artErr = `Каталог красок не загрузился: ${(e as Error).message}`;
+    }
+  }
+  const artBrands = $derived(artCat && artSet.type ? [...new Set(artCat.paints.filter((p) => p.type === artSet.type).map((p) => p.brand))].sort() : []);
+  const artOn = $derived(!!artCat && !!artSet.type);
 
   // Ink whose alternatives are open in Тату → Пигменты.
   let altFor: string | null = $state(null);
@@ -1086,11 +1107,31 @@
   {#if section === 'palette'}
   <section class="card controls">
     <h2>Палитра</h2>
-    <label class="row"><span>Художественные краски {@render i('artPaints')}</span>
-      <select disabled>
-        <option>скоро: акрил, масло, акварель, гуашь…</option>
+    <label class="row"><span>Краски {@render i('artPaints')}</span>
+      <select value={artSet.type} onchange={(e) => chooseArtType((e.currentTarget as HTMLSelectElement).value)}>
+        <option value="">не подбирать</option>
+        {#each [['acrylic', 'Акрил'], ['oil', 'Масло'], ['water-mixable-oil', 'Водорастворимое масло'], ['watercolor', 'Акварель'], ['gouache', 'Гуашь'], ['acrylic-gouache', 'Акриловая гуашь'], ['soft-pastel', 'Сухая пастель'], ['alcohol-marker', 'Спиртовые маркеры'], ['colored-pencil', 'Цветные карандаши']] as [v, label]}<option value={v}>{label}</option>{/each}
       </select>
     </label>
+    {#if artErr}<p class="error">{artErr}</p>{/if}
+    {#if artSet.type && !artCat && !artErr}<p class="muted">Загружаю каталог красок…</p>{/if}
+    {#if artOn}
+      <label class="row"><span>Бренд</span>
+        <select bind:value={artSet.brand}>
+          <option value="">все бренды</option>
+          {#each artBrands as b}<option value={b}>{b}</option>{/each}
+        </select>
+      </label>
+      {#if ['oil', 'acrylic', 'watercolor', 'water-mixable-oil'].includes(artSet.type)}
+        <div class="row">
+          <span>Сравнивать {@render i('artTint')}</span>
+          <div class="seg">
+            <button class:active={!artSet.tint} onclick={() => (artSet.tint = false)}>{artSet.type === 'watercolor' ? 'плотная заливка' : 'масстон'}</button>
+            <button class:active={artSet.tint} onclick={() => (artSet.tint = true)}>{artSet.type === 'watercolor' ? 'лессировка' : 'разбел'}</button>
+          </div>
+        </div>
+      {/if}
+    {/if}
     <label class="row"><span>Dominant {@render i('pal.dominant')}</span> <b>{pparams.dominant}</b><input type="range" min="3" max="12" bind:value={pparams.dominant} /></label>
     <label class="row"><span>Range {@render i('pal.range')}</span> <b>{pparams.range}</b><input type="range" min="3" max="12" bind:value={pparams.range} /></label>
     <label class="row"><span>Accents {@render i('pal.accents')}</span> <b>{pparams.accents}</b><input type="range" min="0" max="12" bind:value={pparams.accents} /></label>
@@ -1110,6 +1151,13 @@
           </button>
         {/each}
       </div>
+      {#if artOn && swatches.length}
+        <p class="muted">Ближайшая краска к каждому образцу. ⇄ покажет замены, если такой краски нет.</p>
+        {#each swatches as s, i}
+          {@const m = nearestPaints(artCat!, artSet, s.lab, 1)[0]}
+          {#if m}{@render paintRow(m.paint, m.dE, `${i + 1}`, s.hex)}{/if}
+        {/each}
+      {/if}
       {#if !swatches.length}<p class="muted">Акцентов нет: насыщенных цветов вдали от основных не нашлось.</p>{/if}
       <p class="muted">Всего {palette.totalMs} мс: чтение пикселей {palette.readMs}, сетка {palette.gridMs}, извлечение {palette.ms}. Тап по образцу открывает карточку цвета.</p>
     {/if}
@@ -1141,6 +1189,12 @@
         <button onclick={() => (compareA = c)}>Запомнить как A</button>
         <button class="primary" onclick={() => findOnPhoto(c)}>Найти на фото</button>
       </div>
+      {#if artOn}
+        <p class="muted">Ближайшие краски набора:</p>
+        {#each nearestPaints(artCat!, artSet, c.lab, 3) as m}{@render paintRow(m.paint, m.dE)}{/each}
+      {:else}
+        <p class="muted">Выбери краски во вкладке «Палитра», и здесь появятся ближайшие из набора.</p>
+      {/if}
       {#if compareA}
         {@const d = compareColors(compareA.rgb, c.rgb)}
         <div class="row">
@@ -1277,6 +1331,24 @@
     </div>
   {/if}
 </main>
+
+{#snippet paintRow(p: ArtPaint, dE: number, tag = '', from = '')}
+  <div class="inkline">
+    <div class="inkrow">
+      {#if from}<span class="dot" style="background: {from}"></span><span class="muted">{tag}</span>{/if}
+      <span class="dot" style="background: {artSet.tint && p.tint ? p.tint.hex : p.hex}"></span>
+      <span>{p.name}{p.code ? ` (${p.code})` : ''} <span class="muted">· {p.brand} · {p.line} · ΔE {dE}{p.pigmentKey ? ` · ${p.pigmentKey.replaceAll('+', ', ')}` : ''}</span></span>
+    </div>
+    <button class="alt" class:active={artAlt === p.id} onclick={() => (artAlt = artAlt === p.id ? null : p.id)} aria-label="Замены">⇄</button>
+  </div>
+  {#if artAlt === p.id && artCat}
+    <div class="alts">
+      {#each paintAlternatives(artCat, p, artSet.tint) as a}
+        <div class="inkrow"><span class="dot" style="background: {artSet.tint && a.paint.tint ? a.paint.tint.hex : a.paint.hex}"></span><span>{a.paint.name} <span class="muted">· {a.paint.brand} · {a.paint.line} · {a.why} · ΔE {a.dE}</span></span></div>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
 
 {#snippet i(key: string)}
   <span class="i" role="button" tabindex="0" aria-label="Что это"
