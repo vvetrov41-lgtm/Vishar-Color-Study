@@ -4,7 +4,7 @@ import { deltaE2000 } from '../src/core/colorinfo';
 import { CalLut, calibrateImage, calibrateLab, DEFAULT_SKIN, NEUTRAL, OWN_TONE, skinView, tileAt } from '../src/core/skin';
 import { contrastMap, DEFAULT_CONTRAST, MARK_A } from '../src/core/contrast';
 import { stencilPdf } from '../src/core/pdf';
-import { DEFAULT_PIGMENTS, focusOn, GREY_SERIES, greyTones, INK_BRANDS, INKS, PHOTO_SHIFT, pigmentMap } from '../src/core/pigments';
+import { alternatives, DEFAULT_PIGMENTS, focusOn, GREY_SERIES, greyTones, INK_BRANDS, INKS, PHOTO_SHIFT, pigmentMap } from '../src/core/pigments';
 import {
   checkLines, DEFAULT_TATTOO, distanceTo, narrowParts, SKIN_TONES, skinPreview, spreadPreview, viewBlurPx, viewFromDistance,
 } from '../src/core/tattoo';
@@ -165,6 +165,20 @@ describe('pigments', () => {
     const f = focusOn(r.rgba, r.index, 0), i = r.index.indexOf(0), o = r.index.findIndex((k) => k !== 0);
     expect([...f.subarray(i * 4, i * 4 + 3)]).toEqual([...r.rgba.subarray(i * 4, i * 4 + 3)]);
     expect(f[o * 4]).toBeGreaterThanOrEqual(190);
+  });
+
+  it('a missing ink is never chosen, a chosen alternative always is', () => {
+    const img = loadFixture('flash');
+    const base = pigmentMap(img.data, img.w, img.h, DEFAULT_PIGMENTS, PHOTO_SHIFT);
+    const gone = base.inks[0].id, alt = alternatives(gone);
+    expect(alt.same.length).toBeGreaterThan(0);
+    expect(alt.other.length).toBeGreaterThan(0);
+    expect(new Set(alt.other.map((a) => a.brand)).size).toBe(alt.other.length);
+    const pick = alt.other[0].id;
+    const r = pigmentMap(img.data, img.w, img.h, { ...DEFAULT_PIGMENTS, excluded: [gone], include: [pick] }, PHOTO_SHIFT);
+    expect(r.inks.map((k) => k.id)).not.toContain(gone);
+    expect(r.inks.map((k) => k.id)).toContain(pick);
+    expect(r.inks.length).toBe(DEFAULT_PIGMENTS.maxInks);
   });
 
   it('black & grey maps L* to the nearest tone, light paper stays skin', () => {

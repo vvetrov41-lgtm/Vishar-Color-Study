@@ -9,7 +9,7 @@
   import { DEFAULT_VIEW, type ViewState } from '../src/core/view';
   import { DEFAULT_TATTOO, SKIN_TONES, type TattooTool } from '../src/core/tattoo';
   import { NEUTRAL, OWN_TONE, skinRgb, tileAt, type Calibration } from '../src/core/skin';
-  import { evenTones, GREY_SERIES, INK_BRANDS } from '../src/core/pigments';
+  import { alternatives, evenTones, GREY_SERIES, INK_BRANDS, inkById } from '../src/core/pigments';
   import { HINTS } from './hints';
   import type { OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
 
@@ -71,6 +71,55 @@
     section === 'original' || section === 'palette' || section === 'highlight' ? 'pipette'
       : section === 'values' ? 'level'
       : section === 'tattoo' && vs.tattoo.tool === 'pigments' ? 'pigment' : 'none');
+
+  // Work chain: the original, then each result taken into work. A result becomes the photo every
+  // section works on (at working-copy resolution), so e.g. pigments follow a calibrated version.
+  let chain: Array<{ label: string; blob: Blob }> = $state([]);
+
+  function stepName(): string {
+    const tab = TABS.find(([v]) => v === section)?.[1] ?? section;
+    return section === 'tattoo' ? `${tab}: ${TOOLS.find(([k]) => k === vs.tattoo.tool)?.[1] ?? vs.tattoo.tool}` : tab;
+  }
+
+  /** Takes what is on screen into work and goes back to «Оригинал» showing it. */
+  async function commit() {
+    if (!engine || !opened) return;
+    try {
+      busy = 'Беру результат в работу…';
+      const blob = await engine.exportWork(), name = stepName();
+      vs.tattoo.pigments.focus = -1;
+      await openBlob(blob, name, true);
+      chain = [...chain, { label: name, blob }];
+      palette = null; current = null; picked = null;
+      openSection('original');
+    } catch (e) {
+      error = String((e as Error)?.message ?? e);
+      busy = '';
+    }
+  }
+
+  /** One step back along the chain, or back to the original. */
+  async function stepBack(toStart = false) {
+    if (chain.length < 2) return;
+    const next = toStart ? chain.slice(0, 1) : chain.slice(0, -1), top = next[next.length - 1];
+    await openBlob(top.blob, top.label, true);
+    chain = next;
+    palette = null; current = null; picked = null;
+  }
+
+  // Ink whose alternatives are open in Тату → Пигменты.
+  let altFor: string | null = $state(null);
+
+  /** The studio has no `id`: never pick it; with `by`, that ink goes into the set instead. */
+  function replaceInk(id: string, by: string | null) {
+    const p = vs.tattoo.pigments;
+    vs.tattoo.pigments = {
+      ...p, focus: -1,
+      excluded: p.include.includes(id) ? p.excluded : [...new Set([...p.excluded, id])],
+      include: [...p.include.filter((x) => x !== id), ...(by ? [by] : [])],
+    };
+    altFor = null;
+  }
 
   /** Shows one pigment (or tone, −2 = skin) on the image; the same again shows all. */
   function focusPigment(k: number) {
@@ -163,6 +212,7 @@
       logCompute(v);
       drawHist();
       if (keep) return;
+      chain = [{ label: 'Оригинал', blob }];
       slider = { n: 0, max: 0, sum: 0, samples: [] };
       hlSlider = { n: 0, max: 0, samples: [] };
       palette = null;
@@ -611,6 +661,7 @@
     </div>
   </section>
 
+  <div class="pinned">
   <div class="stage" bind:this={box} bind:clientWidth={stageW} bind:clientHeight={stageH}>
     <canvas bind:this={canvas} onpointerdown={tap} onpointermove={move} onpointerup={release} onpointercancel={release}></canvas>
     {#if overlay.length}
@@ -638,11 +689,24 @@
   </div>
   {#if error}<p class="error">{error}</p>{/if}
 
+  {#if opened}
+    <div class="chain">
+      <span class="muted">В работе: {chain.map((c) => c.label).join(' → ') || opened.label}</span>
+      {#if section !== 'original' && section !== 'palette'}<button class="primary" onclick={commit} disabled={!!busy}>Взять в работу</button>{/if}
+      {#if chain.length > 1}
+        <button onclick={() => stepBack()} disabled={!!busy}>Шаг назад</button>
+        <button onclick={() => stepBack(true)} disabled={!!busy}>К оригиналу</button>
+      {/if}
+      {@render i('chain')}
+    </div>
+  {/if}
+
   <nav class="tabs">
     {#each TABS as [v, label]}
       <button class:active={section === v} onclick={() => openSection(v)}>{label}</button>
     {/each}
   </nav>
+  </div>
 
   <section class="card controls">
     {#if section === 'original'}
@@ -828,7 +892,7 @@
         {#if pg.source === 'patches'}
           <label class="row"><span>Детали {@render i('simp.details')}</span> <b>{pg.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.pigments.details} /></label>
         {/if}
-        <p class="muted">Тапни по краске в списке или по месту на эскизе: останется видна только она. Повторный тап покажет все.</p>
+        <p class="muted">Тапни по краске в списке или по месту на эскизе: останется видна только она. Повторный тап покажет все. ⇄ у краски — замены, если её нет в наличии {@render i('pig.alt')}</p>
       {:else if t.tool === 'lines'}
         <p class="muted">Проверка, удержатся ли линии и просветы при этом размере тату. Красное: линия тоньше минимума, может расплыться или пропасть. Синее: просвет уже минимума, может затянуться. Ширина в см задаёт масштаб: чем меньше тату, тем больше красного и синего.</p>
         <div class="row">
@@ -927,8 +991,29 @@
         <p class="muted">Средняя разница с эскизом ΔE {pr.meanDE} · кожа без краски {Math.round(pr.skinShare * 100)}% · {ts.ms} мс{last.timings.computeMs ? '' : ' · из кэша'}</p>
         <div class="pairs">
           {#each pr.inks as k, j}
-            <button class="inkrow" class:on={vs.tattoo.pigments.focus === j} onclick={() => focusPigment(j)}><span class="dot" style="background: {k.hex}"></span><span>{k.name} <span class="muted">· {k.line} · {Math.round(k.share * 100)}%{k.conf === 'm' ? '' : ' · цвет по фото флакона'}</span></span></button>
+            <div class="inkline">
+              <button class="inkrow" class:on={vs.tattoo.pigments.focus === j} onclick={() => focusPigment(j)}><span class="dot" style="background: {k.hex}"></span><span>{k.name} <span class="muted">· {k.line} · {Math.round(k.share * 100)}%{k.conf === 'm' ? '' : ' · цвет по фото флакона'}{vs.tattoo.pigments.include.includes(k.id) ? ' · выбрана тобой' : ''}</span></span></button>
+              <button class="alt" class:active={altFor === k.id} onclick={() => (altFor = altFor === k.id ? null : k.id)} aria-label="Замены">⇄</button>
+            </div>
+            {#if altFor === k.id}
+              {@const alt = alternatives(k.id)}
+              <div class="alts">
+                <div class="row"><button onclick={() => replaceInk(k.id, null)}>Нет в наличии</button><span class="muted">подбор возьмёт другую краску сам</span></div>
+                {#each [{ title: 'Этот же бренд', list: alt.same }, { title: 'Другие бренды', list: alt.other }] as { title, list }}
+                  <p class="muted">{title}:</p>
+                  {#each list as a}
+                    <button class="inkrow" onclick={() => replaceInk(k.id, a.id)}><span class="dot" style="background: {a.hex}"></span><span>{a.name} <span class="muted">· {a.brand} · {a.line} · ΔE {a.dE}{a.conf === 'm' ? '' : ' · по фото'}</span></span></button>
+                  {/each}
+                {/each}
+              </div>
+            {/if}
           {/each}
+          {#if vs.tattoo.pigments.excluded.length || vs.tattoo.pigments.include.length}
+            <div class="chips">
+              {#each vs.tattoo.pigments.excluded as id}<button class="chip" onclick={() => (vs.tattoo.pigments.excluded = vs.tattoo.pigments.excluded.filter((x) => x !== id))}>нет: {inkById(id)?.name ?? id} ✕</button>{/each}
+              {#each vs.tattoo.pigments.include as id}<button class="chip" onclick={() => (vs.tattoo.pigments.include = vs.tattoo.pigments.include.filter((x) => x !== id))}>своя: {inkById(id)?.name ?? id} ✕</button>{/each}
+            </div>
+          {/if}
           <button class="inkrow" class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)}><span class="dot" style="background: {vs.tattoo.skin.use ? `rgb(${skinRgb(vs.tattoo.skin).join(',')})` : '#F5F3EF'}"></span><span>Кожа без краски <span class="muted">· {Math.round(pr.skinShare * 100)}%</span></span></button>
         </div>
         {#if pr.misses.length}
@@ -1001,6 +1086,11 @@
   {#if section === 'palette'}
   <section class="card controls">
     <h2>Палитра</h2>
+    <label class="row"><span>Художественные краски {@render i('artPaints')}</span>
+      <select disabled>
+        <option>скоро: акрил, масло, акварель, гуашь…</option>
+      </select>
+    </label>
     <label class="row"><span>Dominant {@render i('pal.dominant')}</span> <b>{pparams.dominant}</b><input type="range" min="3" max="12" bind:value={pparams.dominant} /></label>
     <label class="row"><span>Range {@render i('pal.range')}</span> <b>{pparams.range}</b><input type="range" min="3" max="12" bind:value={pparams.range} /></label>
     <label class="row"><span>Accents {@render i('pal.accents')}</span> <b>{pparams.accents}</b><input type="range" min="0" max="12" bind:value={pparams.accents} /></label>
@@ -1242,9 +1332,18 @@
     padding: 12px;
     margin: 12px 0;
   }
+  /* The photo and the section tabs stay on screen; the controls scroll under them. */
+  .pinned {
+    position: sticky; top: 0; z-index: 5;
+    margin: 0 -16px; padding: calc(4px + env(safe-area-inset-top)) 16px 6px;
+    background: var(--bg); border-bottom: 1px solid var(--line);
+  }
+  .chain { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+  .chain .muted { flex: 1 1 100%; margin: 0; }
+  .chain button { font-size: 13px; padding: 4px 10px; }
   .stage {
     position: relative;
-    height: min(62vh, 560px);
+    height: min(44vh, 460px);
     background: var(--stage);
     border-radius: 12px;
     overflow: hidden;
@@ -1268,7 +1367,9 @@
   button:disabled { opacity: 0.5; }
   .chip { font-size: 13px; padding: 4px 9px; }
   .primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 4px; margin-top: 10px; }
+  .tabs { display: flex; gap: 4px; margin-top: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs button { flex: none; padding: 6px 12px !important; }
   .progress { position: absolute; left: 12px; right: 12px; bottom: 12px; height: 6px; border-radius: 3px; background: rgba(0, 0, 0, 0.25); overflow: hidden; }
   .progress span { display: block; height: 100%; background: var(--accent); transition: width 0.1s; }
   .tabs button { font-size: 13px; }
@@ -1299,6 +1400,10 @@
   .controls label.row { color: var(--muted); font-size: 14px; }
   .controls label.row b { color: var(--fg); min-width: 26px; }
   .controls input[type='range'] { flex: 1; min-width: 160px; }
+  .inkline { display: flex; gap: 6px; align-items: stretch; }
+  .inkline .inkrow { flex: 1; }
+  .alt { margin: 4px 0; padding: 0 12px; font-size: 16px; }
+  .alts { margin: 0 0 8px 16px; padding-left: 8px; border-left: 2px solid var(--line); }
   .inkrow { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; margin: 4px 0; padding: 6px 8px; font-size: 13px; }
   .inkrow.on, .levels button.on { outline: 2px solid var(--accent); outline-offset: 1px; }
   .levels button { flex: 1; border: 1px solid var(--line); border-radius: 4px; padding: 4px 0; font-size: 12px; }

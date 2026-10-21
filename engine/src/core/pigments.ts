@@ -62,13 +62,17 @@ export interface PigmentParams {
   details: number;
   /** A design colour farther than this (ΔE2000) from every pigment of the brand is reported. */
   farDE: number;
+  /** Ink ids the studio does not have: never chosen. */
+  excluded: string[];
+  /** Ink ids (any brand) always in the set, e.g. an alternative picked instead of a missing ink. */
+  include: string[];
   /** Black & Grey: index in GREY_SERIES for the tone names, −1 = no series. */
   series: number;
   /** Black & Grey: L* of each tone from light to dark (the darkest one is black). */
   tonesL: number[];
 }
 
-export const DEFAULT_PIGMENTS: PigmentParams = { mode: 'color', source: 'photo', focus: -1, brand: INK_BRANDS[0] ?? '', maxInks: 4, details: 3, farDE: 10, series: -1, tonesL: [75, 55, 35, 12] };
+export const DEFAULT_PIGMENTS: PigmentParams = { mode: 'color', source: 'photo', focus: -1, brand: INK_BRANDS[0] ?? '', maxInks: 4, details: 3, farDE: 10, excluded: [], include: [], series: -1, tonesL: [75, 55, 35, 12] };
 
 /** Evenly spaced tones for n dilutions, light to dark, the last one black. */
 export const evenTones = (n: number): number[] => Array.from({ length: n }, (_, i) => Math.round(80 - (i * (80 - 12)) / Math.max(1, n - 1)));
@@ -119,10 +123,30 @@ export const PHOTO_SHIFT = 3;
 const DE2000_PAIRS = 400_000;
 const de76 = (a: Lab, b: Lab) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 
+export interface AltInk { id: string; brand: string; line: string; name: string; hex: string; conf: Confidence; dE: number }
+
+/**
+ * Inks close to the given one, for a pigment the studio does not have: the nearest of the same
+ * brand and of every other brand, by ΔE2000 of catalogue colours (estimates, see conf).
+ */
+export function alternatives(id: string, sameBrand = 4, otherBrands = 6): { same: AltInk[]; other: AltInk[] } {
+  const ink = INKS.find((i) => i.id === id);
+  if (!ink) return { same: [], other: [] };
+  const all = INKS.filter((i) => i.id !== id && usable(i)).map((i) => ({ id: i.id, brand: i.brand, line: i.line, name: i.name, hex: i.hex, conf: i.conf, dE: round1(deltaE2000(ink.lab, i.lab)) }))
+    .sort((a, b) => a.dE - b.dE);
+  // Other brands: the closest ink of each brand first, so one brand does not fill the list.
+  const seen = new Set<string>(), other: AltInk[] = [];
+  for (const a of all) if (a.brand !== ink.brand && !seen.has(a.brand) && other.length < otherBrands) { seen.add(a.brand); other.push(a); }
+  return { same: all.filter((a) => a.brand === ink.brand).slice(0, sameBrand), other };
+}
+
+export const inkById = (id: string) => INKS.find((i) => i.id === id);
+
 /** Pigment version of a simplified design (plan 5.2, colour). */
 export function pigmentMap(rgba: ArrayLike<number>, w: number, h: number, p: PigmentParams, shift = 0): PigmentResult {
   const t0 = performance.now(), n = w * h, { cls, cols, area, lab } = classes(rgba, n, shift);
-  const cand = INKS.filter((i) => usable(i) && (!p.brand || i.brand === p.brand));
+  const out0 = new Set(p.excluded ?? []), forced = new Set(p.include ?? []);
+  const cand = INKS.filter((i) => !out0.has(i.id) && (forced.has(i.id) || (usable(i) && (!p.brand || i.brand === p.brand))));
   const K = cols.length, C = cand.length, de = K * C <= DE2000_PAIRS ? deltaE2000 : de76;
   // ΔE from every design colour to every pigment, and to untouched skin.
   const D = new Float32Array(K * C), skin = new Float32Array(K);
@@ -131,8 +155,14 @@ export function pigmentMap(rgba: ArrayLike<number>, w: number, h: number, p: Pig
     for (let c = 0; c < C; c++) D[k * C + c] = de(lab[k], cand[c].lab);
   }
   // Greedy choice: add the pigment that lowers the area-weighted ΔE most, up to maxInks.
+  // Inks the master put in are chosen first, the greedy choice fills the rest.
   const best = Float32Array.from(skin), chosen: number[] = [];
-  for (let step = 0; step < Math.max(1, Math.round(p.maxInks)); step++) {
+  cand.forEach((c, j) => {
+    if (!forced.has(c.id)) return;
+    chosen.push(j);
+    for (let k = 0; k < K; k++) best[k] = Math.min(best[k], D[k * C + j]);
+  });
+  for (let step = chosen.length; step < Math.max(1, Math.round(p.maxInks)); step++) {
     let pick = -1, gain = 0;
     for (let c = 0; c < C; c++) {
       if (chosen.includes(c)) continue;
