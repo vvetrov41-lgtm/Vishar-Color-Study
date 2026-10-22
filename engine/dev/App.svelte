@@ -884,6 +884,7 @@
             <button class:active={pg.mode === 'bg'} onclick={() => (vs.tattoo.pigments = { ...vs.tattoo.pigments, mode: 'bg', focus: -1 })}>Black & Grey</button>
           </div>
         </div>
+        <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.pigments.blend} /> {pg.mode === 'color' ? 'Смешивание: до 2 красок и разбавление' : 'Плавные переходы между тонами'} {@render i('pig.blend')}</label>
         {#if pg.mode === 'color'}
           <label class="row"><span>Бренд {@render i('pig.brand')}</span>
             <select bind:value={vs.tattoo.pigments.brand}>

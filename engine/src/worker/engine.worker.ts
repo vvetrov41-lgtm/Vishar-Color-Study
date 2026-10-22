@@ -55,7 +55,7 @@ class Engine {
   // The design calibrated for the chosen skin tone, per smoothing level (only the current calibration).
   private calibrated = new Map<Smoothing, { key: string; px: Uint8Array; lab8: Uint8Array }>();
   /** Pigments before a focus is applied: the per-pixel index lets a tap find its pigment. */
-  private pig: { key: string; rgba: Uint8ClampedArray; index: Int8Array; stats: NonNullable<TattooStats['pigments']>; ms: number } | null = null;
+  private pig: { key: string; rgba: Uint8ClampedArray; index: Int8Array; index2?: Int8Array; stats: NonNullable<TattooStats['pigments']>; ms: number } | null = null;
   private uploaded = '';
   private progress: ((share: number, stage: string) => void) | null = null;
 
@@ -149,20 +149,20 @@ class Engine {
       return this.tatSeg.res;
     };
     if (t.tool === 'pigments') {
-      const pg = t.pigments, { focus: _f, ...base } = pg, pkey = `${lv}:${this.calKey(t)}:${JSON.stringify(pg.mode === 'bg' ? [base.source, base.details, base.tonesL] : { ...base, series: 0, tonesL: 0 })}`;
+      const pg = t.pigments, { focus: _f, ...base } = pg, pkey = `${lv}:${this.calKey(t)}:${JSON.stringify(pg.mode === 'bg' ? [base.source, base.details, base.tonesL, base.blend] : { ...base, series: 0, tonesL: 0 })}`;
       if (this.pig?.key !== pkey) {
         const tp = now(), photo = pg.source === 'photo';
         const src = photo ? this.design(lv, t).px : segment(pigmentSimplify(pg)).rgba, shift = photo ? PHOTO_SHIFT : 0;
         const colors = photo ? 0 : this.tatSeg!.res.colors;
         if (pg.mode === 'bg') {
-          const res = greyTones(src, w, h, pg.tonesL, shift);
+          const res = greyTones(src, w, h, pg.tonesL, shift, pg.blend);
           this.pig = { key: pkey, rgba: res.rgba, index: res.index, stats: { tones: [...pg.tonesL], shares: res.shares, skinShare: res.skinShare, colors }, ms: now() - tp };
         } else {
           const res = pigmentMap(src, w, h, pg, shift);
-          this.pig = { key: pkey, rgba: res.rgba, index: res.index, stats: { inks: res.inks, skinShare: res.skinShare, misses: res.misses, meanDE: res.meanDE, colors }, ms: now() - tp };
+          this.pig = { key: pkey, rgba: res.rgba, index: res.index, index2: res.index2, stats: { inks: res.inks, skinShare: res.skinShare, misses: res.misses, meanDE: res.meanDE, colors }, ms: now() - tp };
         }
       }
-      rgba = pg.focus === -1 ? this.pig.rgba : focusOn(this.pig.rgba, this.pig.index, pg.focus);
+      rgba = pg.focus === -1 ? this.pig.rgba : focusOn(this.pig.rgba, this.pig.index, pg.focus, this.pig.index2);
       if (onTone) rgba = onSkin(rgba, n, onTone);
       stats.pigments = this.pig.stats;
     } else if (t.tool === 'design') {

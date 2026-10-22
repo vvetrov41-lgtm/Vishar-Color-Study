@@ -139,7 +139,7 @@ describe('pigments', () => {
     const ink = INKS.find((i) => i.brand === 'Radiant Colors' && i.conf === 'm')!;
     const v = parseInt(ink.hex.slice(1), 16), c = [v >> 16, (v >> 8) & 255, v & 255] as const;
     const w = 90, h = 40, px = paint(w, h, (x) => (x < 30 ? c : x < 60 ? [255, 255, 255] : [20, 20, 20]));
-    const r = pigmentMap(px, w, h, { ...DEFAULT_PIGMENTS, brand: 'Radiant Colors', maxInks: 2 });
+    const r = pigmentMap(px, w, h, { ...DEFAULT_PIGMENTS, blend: false, brand: 'Radiant Colors', maxInks: 2 });
     expect(r.inks.length).toBeLessThanOrEqual(2);
     const at = (x: number) => '#' + [...r.rgba.subarray((20 * w + x) * 4, (20 * w + x) * 4 + 3)].map((u) => u.toString(16).padStart(2, '0')).join('').toUpperCase();
     expect(r.inks.some((i) => i.hex === ink.hex)).toBe(true);
@@ -149,7 +149,7 @@ describe('pigments', () => {
 
   it('reports a colour the brand cannot reach', () => {
     const w = 60, h = 40, px = paint(w, h, (x) => (x < 30 ? [0, 255, 0] : [255, 255, 255]));
-    const r = pigmentMap(px, w, h, { ...DEFAULT_PIGMENTS, brand: 'Dynamic', maxInks: 3, farDE: 3 });
+    const r = pigmentMap(px, w, h, { ...DEFAULT_PIGMENTS, blend: false, brand: 'Dynamic', maxInks: 3, farDE: 3 });
     expect(r.misses.length).toBe(1);
     expect(r.misses[0].hex).toBe('#00FF00');
     expect(r.misses[0].nearest.length).toBeGreaterThan(0);
@@ -157,7 +157,7 @@ describe('pigments', () => {
 
   it('photo source: the per-pixel index follows the ink list, focus keeps only that ink', () => {
     const img = loadFixture('portrait');
-    const r = pigmentMap(img.data, img.w, img.h, { ...DEFAULT_PIGMENTS, maxInks: 6 }, PHOTO_SHIFT);
+    const r = pigmentMap(img.data, img.w, img.h, { ...DEFAULT_PIGMENTS, blend: false, maxInks: 6 }, PHOTO_SHIFT);
     expect(r.inks.length).toBe(6);
     const count = r.inks.map(() => 0);
     for (const k of r.index) if (k >= 0) count[k]++;
@@ -181,9 +181,35 @@ describe('pigments', () => {
     expect(r.inks.length).toBe(DEFAULT_PIGMENTS.maxInks);
   });
 
+  it('blend: inks at their dilution follow a realistic photo far closer than flat inks', () => {
+    const img = loadFixture('portrait'), p = { ...DEFAULT_PIGMENTS, maxInks: 6 };
+    const flat = pigmentMap(img.data, img.w, img.h, { ...p, blend: false }, PHOTO_SHIFT);
+    const mix = pigmentMap(img.data, img.w, img.h, p, PHOTO_SHIFT);
+    expect(mix.meanDE).toBeLessThan(flat.meanDE * 0.75);
+    expect(mix.index2).toBeDefined();
+    // Focus on an ink also keeps the pixels where it is the second ink of the mix.
+    const j = mix.index2!.findIndex((k) => k >= 0), k = mix.index2![j];
+    const f = focusOn(mix.rgba, mix.index, k, mix.index2);
+    expect([...f.subarray(j * 4, j * 4 + 3)]).toEqual([...mix.rgba.subarray(j * 4, j * 4 + 3)]);
+  });
+
+  it('blend: a diluted ink on white is found as that ink, paper stays skin', () => {
+    const ink = INKS.find((i) => i.brand === 'Radiant Colors' && i.conf === 'm' && i.family !== 'black' && i.family !== 'white')!;
+    const v = parseInt(ink.hex.slice(1), 16), c = [v >> 16, (v >> 8) & 255, v & 255];
+    const half = c.map((x) => Math.round(255 * Math.sqrt((x / 255) * 1))) as unknown as readonly [number, number, number];
+    const w = 60, h = 20, px = paint(w, h, (x) => (x < 20 ? (c as unknown as [number, number, number]) : x < 40 ? half : [255, 255, 255]));
+    const r = pigmentMap(px, w, h, { ...DEFAULT_PIGMENTS, brand: 'Radiant Colors', maxInks: 2 });
+    expect(r.inks[0].id).toBe(ink.id);
+    expect(r.index[10 * w + 30]).toBe(0);
+    expect(r.index[10 * w + 50]).toBe(-1);
+    expect(r.meanDE).toBeLessThan(4);
+  });
+
   it('black & grey maps L* to the nearest tone, light paper stays skin', () => {
     const w = 40, h = 10, px = paint(w, h, (x) => (x < 10 ? [0, 0, 0] : x < 20 ? [119, 119, 119] : [255, 255, 255]));
-    const r = greyTones(px, w, h, [70, 50, 12]);
+    const r = greyTones(px, w, h, [70, 50, 12]), b = greyTones(px, w, h, [70, 50, 12], 0, true);
+    expect(b.shares).toEqual(r.shares);
+    expect(b.rgba[15 * 4]).toBe(119);
     expect(r.shares).toEqual([0, 0.25, 0.25]);
     expect(r.skinShare).toBe(0.5);
   });
