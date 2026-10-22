@@ -10,7 +10,7 @@
   import { DEFAULT_TATTOO, SKIN_TONES, type TattooTool } from '../src/core/tattoo';
   import { NEUTRAL, OWN_TONE, skinRgb, tileAt, type Calibration } from '../src/core/skin';
   import { nearestPaints, paintAlternatives, parseArtCatalogue, type ArtCatalogue, type ArtPaint, type ArtSet } from '../src/core/artpaints';
-  import { alternatives, evenTones, GREY_SERIES, INK_BRANDS, inkById } from '../src/core/pigments';
+  import { alternatives, evenTones, GREY_SERIES, INK_BRANDS, inkById, inkRecipe, nearestInks } from '../src/core/pigments';
   import { HINTS } from './hints';
   import type { OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
 
@@ -68,10 +68,10 @@
   // A tap on the photo: picks the level in Values, the target in Highlight, a colour elsewhere.
   // Only where a tap means something: a colour on the original or palette, the target in Highlight,
   // the level in Values, the pigment in Тату → Пигменты. Elsewhere a tap does nothing.
-  const tool: 'pipette' | 'level' | 'pigment' | 'none' = $derived(
-    section === 'original' || section === 'palette' || section === 'highlight' ? 'pipette'
-      : section === 'values' ? 'level'
-      : section === 'tattoo' && vs.tattoo.tool === 'pigments' ? 'pigment' : 'none');
+  const tool: 'pipette' | 'level' | 'none' = $derived(
+    section === 'original' || section === 'palette' || section === 'highlight' || (section === 'tattoo' && vs.tattoo.tool === 'pigments') ? 'pipette'
+      : section === 'values' ? 'level' : 'none');
+  const inkPipette = $derived(section === 'tattoo' && vs.tattoo.tool === 'pigments');
 
   // Work chain: the original, then each result taken into work. A result becomes the photo every
   // section works on (at working-copy resolution), so e.g. pigments follow a calibrated version.
@@ -358,13 +358,6 @@
       canvas.setPointerCapture(e.pointerId);
       pressed = true;
       void pipette(e);
-      return;
-    }
-    if (tool === 'pigment' && last) {
-      const r = canvas.getBoundingClientRect();
-      const u = ((e.clientX - r.left) / r.width - last.rect.x) / last.rect.w, v = ((e.clientY - r.top) / r.height - last.rect.y) / last.rect.h;
-      const k = await engine.pickPigment(u, v);
-      if (k !== null) focusPigment(k);
       return;
     }
     if (tool !== 'level') return;
@@ -918,7 +911,7 @@
         {#if pg.source === 'patches'}
           <label class="row"><span>Детали {@render i('simp.details')}</span> <b>{pg.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.pigments.details} /></label>
         {/if}
-        <p class="muted">Тапни по краске в списке или по месту на эскизе: останется видна только она. Повторный тап покажет все. ⇄ у краски — замены, если её нет в наличии {@render i('pig.alt')}</p>
+        <p class="muted">Тапни по краске в списке: останется видна только она, повторный тап покажет все. Тап или ведение пальцем по эскизу работает как пипетка: внизу появятся цвет точки, рецепт из красок эскиза и ближайшие краски бренда. ⇄ у краски — замены, если её нет в наличии {@render i('pig.alt')}</p>
       {:else if t.tool === 'lines'}
         <p class="muted">Проверка, удержатся ли линии и просветы при этом размере тату. Красное: линия тоньше минимума, может расплыться или пропасть. Синее: просвет уже минимума, может затянуться. Ширина в см задаёт масштаб: чем меньше тату, тем больше красного и синего.</p>
         <div class="row">
@@ -1056,7 +1049,7 @@
           {#each pr.tones as L, k}<button class:on={vs.tattoo.pigments.focus === k} onclick={() => focusPigment(k)} style="background: rgb({labToSrgb(L, 0, 0).join(',')}); color: {L > 55 ? '#000' : '#fff'}">{Math.round(pr.shares[k] * 100)}%</button>{/each}
           <button class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)} style="background: #fff; color: #000">кожа {Math.round(pr.skinShare * 100)}%</button>
         </div>
-        <p class="muted">Тапни по тону или по месту на эскизе, чтобы увидеть, где он.</p>
+        <p class="muted">Тапни по тону, чтобы увидеть, где он. Пипетка по эскизу покажет светлоту точки и ближайший тон.</p>
         <p class="muted">Кожа без краски {Math.round(pr.skinShare * 100)}% · {ts.ms} мс</p>
       {:else if ts.lines}
         <p class="muted">{ts.lines.pxPerMm} px/мм · линий {(ts.lines.inkShare * 100).toFixed(1)}% · тонких {(ts.lines.thinShare * 100).toFixed(1)}% линий · узких зазоров {(ts.lines.gapShare * 100).toFixed(1)}% площади · {ts.ms} мс</p>
@@ -1194,7 +1187,33 @@
         <button onclick={() => (compareA = c)}>Запомнить как A</button>
         <button class="primary" onclick={() => findOnPhoto(c)}>Найти на фото</button>
       </div>
-      {#if artOn}
+      {#if inkPipette}
+        {@const pg = vs.tattoo.pigments}
+        {@const tp = last?.stats.tattoo?.pigments}
+        {@const set = tp && 'inks' in tp ? tp.inks : []}
+        {#if pg.mode === 'bg'}
+          {@const k = pg.tonesL.reduce((b, L, j) => (Math.abs(L - c.lab[0]) < Math.abs(pg.tonesL[b] - c.lab[0]) ? j : b), 0)}
+          <p class="muted">Светлота L* {Math.round(c.lab[0])}: ближе всего {pg.series >= 0 ? GREY_SERIES[pg.series].names[k] : `тон ${k + 1}`} (L* {pg.tonesL[k]}).</p>
+        {:else}
+          {@const rec = inkRecipe(c.rgb, set.map((k) => k.id))}
+          {#if rec}
+            <p class="muted">Из красок на эскизе (ΔE {rec.dE}):</p>
+            <div class="row"><span class="dot" style="background: {rec.hex}"></span><span>{rec.inks.length ? rec.inks.map((k) => `${k.name} ${k.pct}%`).join(' + ') : 'кожа без краски'}</span></div>
+            {#each rec.inks as k}
+              {@const j = set.findIndex((s) => s.id === k.id)}
+              {#if j >= 0}<button class="inkrow" class:on={pg.focus === j} onclick={() => focusPigment(j)}><span class="dot" style="background: {k.hex}"></span><span>Показать {k.name} на эскизе</span></button>{/if}
+            {/each}
+          {/if}
+          <p class="muted">Ближайшие краски {pg.brand || 'всех брендов'}:</p>
+          {#each nearestInks(c.lab, pg.brand, 5, pg.excluded) as a}
+            {@const inSet = set.some((k) => k.id === a.id)}
+            <div class="inkline">
+              <span class="inkrow"><span class="dot" style="background: {a.hex}"></span><span>{a.name} <span class="muted">· {a.line} · ΔE {a.dE}{a.conf === 'm' ? '' : ' · по фото'}{inSet ? ' · уже на эскизе' : ''}</span></span></span>
+              {#if !inSet}<button class="alt" onclick={() => (vs.tattoo.pigments = { ...pg, focus: -1, include: [...new Set([...pg.include, a.id])] })} aria-label="Добавить в набор">+</button>{/if}
+            </div>
+          {/each}
+        {/if}
+      {:else if artOn}
         <p class="muted">Ближайшие краски набора:</p>
         {#each nearestPaints(artCat!, artSet, c.lab, 3) as m}{@render paintRow(m.paint, m.dE)}{/each}
       {:else}

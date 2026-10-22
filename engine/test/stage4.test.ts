@@ -4,7 +4,7 @@ import { deltaE2000 } from '../src/core/colorinfo';
 import { CalLut, calibrateImage, calibrateLab, DEFAULT_SKIN, NEUTRAL, OWN_TONE, skinView, tileAt } from '../src/core/skin';
 import { contrastMap, DEFAULT_CONTRAST, MARK_A } from '../src/core/contrast';
 import { stencilPdf } from '../src/core/pdf';
-import { alternatives, DEFAULT_PIGMENTS, focusOn, GREY_SERIES, greyTones, INK_BRANDS, INKS, PHOTO_SHIFT, pigmentMap } from '../src/core/pigments';
+import { alternatives, DEFAULT_PIGMENTS, focusOn, GREY_SERIES, greyTones, INK_BRANDS, inkRecipe, INKS, nearestInks, PHOTO_SHIFT, pigmentMap } from '../src/core/pigments';
 import {
   checkLines, DEFAULT_TATTOO, distanceTo, narrowParts, SKIN_TONES, skinPreview, spreadPreview, viewBlurPx, viewFromDistance,
 } from '../src/core/tattoo';
@@ -203,6 +203,19 @@ describe('pigments', () => {
     expect(r.index[10 * w + 30]).toBe(0);
     expect(r.index[10 * w + 50]).toBe(-1);
     expect(r.meanDE).toBeLessThan(4);
+  });
+
+  it('pipette: the nearest inks of the brand and a recipe from the inks on the design', () => {
+    const ink = INKS.find((i) => i.brand === 'Radiant Colors' && i.conf === 'm' && i.family !== 'black' && i.family !== 'white')!;
+    const near = nearestInks(ink.lab, 'Radiant Colors', 5);
+    expect(near[0].id).toBe(ink.id);
+    expect(near.every((a) => a.brand === 'Radiant Colors')).toBe(true);
+    expect(nearestInks(ink.lab, 'Radiant Colors', 5, [ink.id])[0].id).not.toBe(ink.id);
+    const v = parseInt(ink.hex.slice(1), 16), black = INKS.find((i) => i.brand === 'Radiant Colors' && i.family === 'black')!;
+    const r = inkRecipe([v >> 16, (v >> 8) & 255, v & 255], [black.id, ink.id])!;
+    expect(r.inks[0].id).toBe(ink.id);
+    expect(r.dE).toBeLessThan(3);
+    expect(inkRecipe([255, 255, 255], [ink.id])!.inks.length).toBe(0);
   });
 
   it('black & grey maps L* to the nearest tone, light paper stays skin', () => {

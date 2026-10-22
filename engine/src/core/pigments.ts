@@ -190,6 +190,37 @@ const fromLog = (s: number[], u: number[], a: number, v: number[] | null, b: num
 /** Below this optical strength (dilution × mean log density) an ink counts as absent. */
 const TRACE = 0.06;
 
+/** Inks of a brand ('' = all) nearest to a colour, by ΔE2000; the pipette in Тату → Пигменты. */
+export function nearestInks(lab: Lab, brand: string, n = 5, excluded: string[] = []): AltInk[] {
+  const out = new Set(excluded);
+  return INKS.filter((i) => usable(i) && !out.has(i.id) && (!brand || i.brand === brand))
+    .map((i) => ({ id: i.id, brand: i.brand, line: i.line, name: i.name, hex: i.hex, conf: i.conf, dE: round1(deltaE2000(lab, i.lab)) }))
+    .sort((a, b) => a.dE - b.dE).slice(0, n);
+}
+
+export interface Recipe { inks: Array<{ id: string; name: string; hex: string; pct: number }>; hex: string; dE: number }
+
+/** How the given inks reach a colour on skin: one or two of them at their dilution (as blend does). */
+export function inkRecipe(rgb: readonly number[], ids: string[]): Recipe | null {
+  const set = ids.map(inkById).filter((i): i is Ink => !!i);
+  if (!set.length) return null;
+  const skinRgb = labToSrgb(...SKIN), S = logLin(...skinRgb), lab = srgbToLab(rgb[0], rgb[1], rgb[2]);
+  const t = logLin(rgb[0], rgb[1], rgb[2]).map((v, k) => v - S[k]), U = set.map((i) => hexLog(i.hex).map((v, k) => v - S[k]));
+  let best: { x: number; y: number; a: number; b: number; e: number } = { x: -1, y: -1, a: 0, b: 0, e: dot(t, t) };
+  for (let x = 0; x < set.length; x++) {
+    const [a, , e] = fit2(t, U[x], null);
+    if (e < best.e) best = { x, y: -1, a, b: 0, e };
+    for (let y = x + 1; y < set.length; y++) {
+      const [a2, b2, e2] = fit2(t, U[x], U[y]);
+      if (e2 < best.e - 1e-9) best = { x, y, a: a2, b: b2, e: e2 };
+    }
+  }
+  const m = best.x < 0 ? skinRgb : fromLog(S, U[best.x], best.a, best.y < 0 ? null : U[best.y], best.b);
+  const inks = [[best.x, best.a], [best.y, best.b]].filter(([j, c]) => j >= 0 && c > 0.02).sort((p, q) => q[1] - p[1])
+    .map(([j, c]) => ({ id: set[j].id, name: set[j].name, hex: set[j].hex, pct: Math.round(c * 100) }));
+  return { inks, hex: hex(m), dE: round1(deltaE2000(lab, srgbToLab(m[0], m[1], m[2]))) };
+}
+
 /** Pigment version of a simplified design (plan 5.2, colour). */
 export function pigmentMap(rgba: ArrayLike<number>, w: number, h: number, p: PigmentParams, shift = 0): PigmentResult {
   const t0 = performance.now(), n = w * h, { cls, cols, area, lab } = classes(rgba, n, shift);

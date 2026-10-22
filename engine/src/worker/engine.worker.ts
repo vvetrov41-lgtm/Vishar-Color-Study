@@ -419,7 +419,8 @@ class Engine {
   pickColor(u: number, v: number, size: number): PickResult | null {
     const r = this.renderer, t0 = now();
     if (u < 0 || v < 0 || u >= 1 || v >= 1) return null;
-    const px = this.pixels(), x = Math.floor(u * r.w), y = Math.floor(v * r.h);
+    // In Тату the pipette reads the design the tools work on (its skin version, when chosen).
+    const px = this.state.view === 'tattoo' ? this.design(0, this.state.tattoo).px : this.pixels(), x = Math.floor(u * r.w), y = Math.floor(v * r.h);
     const rgb = meanRgb(px, square(x, y, size, r.w, r.h));
     const patch = new Uint8Array(LOUPE * LOUPE * 4), o = LOUPE >> 1;
     for (let j = 0; j < LOUPE; j++) for (let i = 0; i < LOUPE; i++) {
