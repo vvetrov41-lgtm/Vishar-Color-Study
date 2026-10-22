@@ -165,6 +165,9 @@ class Engine {
       rgba = pg.focus === -1 ? this.pig.rgba : focusOn(this.pig.rgba, this.pig.index, pg.focus);
       if (onTone) rgba = onSkin(rgba, n, onTone);
       stats.pigments = this.pig.stats;
+    } else if (t.tool === 'design') {
+      // The design as it is (taken into work, or its skin version): nothing simplified.
+      rgba = new Uint8ClampedArray(this.design(lv, t).px);
     } else if (t.tool === 'contrast') {
       segment(contrastSimplify(t.contrast));
       const c = contrastMap(this.tatSeg!.res.rgba, w, h, t.contrast);
@@ -516,7 +519,7 @@ class Engine {
       ['simplify posterize, 4 цвета, тёмные элементы', { ...base, view: 'simplify', simplify: { ...base.simplify, mode: 'posterize', paletteLimit: 4, keepDark: true } }],
       ['drawing sketch', { ...base, view: 'drawing' }],
       ['drawing contours stroke 3 invert', { ...base, view: 'drawing', smoothing: 1, drawing: { mode: 'contours', line: 60, stroke: 3, invert: true } }],
-      ['тату: контраст', { ...base, view: 'tattoo' }],
+      ['тату: контраст', { ...base, view: 'tattoo', tattoo: { ...base.tattoo, tool: 'contrast' } }],
       ['тату: линии 0,5 мм', { ...base, view: 'tattoo', tattoo: { ...base.tattoo, tool: 'lines' } }],
     ];
     for (const [name, url] of Object.entries(fixtures)) {

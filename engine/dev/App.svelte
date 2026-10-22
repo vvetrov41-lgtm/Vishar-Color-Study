@@ -33,7 +33,7 @@
   // Stage 3 targets: Clustering ≤ 1 s on the working copy, Graph ≤ 3 s with a progress indicator.
   const TARGET3 = { clusteringMs: 1000, graphMs: 3000, drawSliderMs: 50 };
   const TABS = [['original', 'Оригинал'], ['palette', 'Палитра'], ['values', 'Values'], ['notan', 'Notan'], ['temperature', 'Temp'], ['highlight', 'Highlight'], ['simplify', 'Simplify'], ['drawing', 'Drawing'], ['tattoo', 'Тату']] as const;
-  const TOOLS: Array<[TattooTool, string]> = [['contrast', 'Контраст'], ['pigments', 'Пигменты'], ['lines', 'Линии'], ['distance', 'Расстояние'], ['spread', 'Расплывание'], ['skin', 'Кожа']];
+  const TOOLS: Array<[TattooTool, string]> = [['design', 'Эскиз'], ['contrast', 'Контраст'], ['pigments', 'Пигменты'], ['lines', 'Линии'], ['distance', 'Расстояние'], ['spread', 'Расплывание'], ['skin', 'Кожа']];
   const SKIN_NAMES = ['I', 'II', 'III', 'IV', 'V', 'VI'];
   const toneName = (k: number) => (k === OWN_TONE ? 'свой тон' : `тон ${SKIN_NAMES[k]}`);
   // Calibration sliders of the skin tool: key, label, min, max, unit.
@@ -89,6 +89,7 @@
       busy = 'Беру результат в работу…';
       const blob = await engine.exportWork(), name = stepName();
       vs.tattoo.pigments.focus = -1;
+      vs.tattoo.tool = 'design';
       await openBlob(blob, name, true);
       chain = [...chain, { label: name, blob }];
       palette = null; current = null; picked = null;
@@ -221,6 +222,7 @@
     error = '';
     busy = `Открываю ${label}…`;
     lastBlob = { blob, label };
+    if (!keep) vs.tattoo.tool = 'design';
     stall.max = 0;
     const t0 = performance.now();
     try {
@@ -860,11 +862,13 @@
       {#if t.tool !== 'skin' && t.skin.use}
         <div class="row"><span class="muted">Работаешь с версией для кожи: {toneName(t.skin.tone)} <span class="dot" style="background: rgb({skinRgb(t.skin).join(',')})"></span></span><button onclick={() => (vs.tattoo.skin.use = false)}>Исходный эскиз</button></div>
       {/if}
-      {#if t.tool !== 'skin' && t.tool !== 'pigments'}
+      {#if t.tool !== 'skin' && t.tool !== 'pigments' && t.tool !== 'design'}
         <label class="row"><span>Ширина тату, см {@render i('tat.width')}</span> <b>{t.widthCm}</b><input type="range" min="2" max="40" step="0.5" bind:value={vs.tattoo.widthCm} /></label>
       {/if}
       <div class="row"><span class="muted">Настройки всех инструментов {@render i('tat.reset')}</span><button onclick={() => (vs.tattoo = { ...structuredClone(DEFAULT_TATTOO), tool: t.tool })}>Сбросить</button></div>
-      {#if t.tool === 'contrast'}
+      {#if t.tool === 'design'}
+        <p class="muted">Эскиз как есть, без упрощения. Выбери инструмент выше: каждый проверяет одно свойство эскиза.</p>
+      {:else if t.tool === 'contrast'}
         <p class="muted">Эскиз упрощается до пятен; границы соседних цветов с близкой светлотой отмечены полосками: со временем они могут слиться.</p>
         <label class="row"><span>Порог ΔL* {@render i('con.minDL')}</span> <b>{t.contrast.minDL}</b><input type="range" min="3" max="40" bind:value={vs.tattoo.contrast.minDL} /></label>
         <label class="row"><span>Детали {@render i('con.details')}</span> <b>{t.contrast.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.contrast.details} /></label>
@@ -1211,7 +1215,7 @@
     <h2>Этап 4: тату-инструменты</h2>
     {#if opened}
       <ul class="targets">
-        {#each TOOLS as [k, label]}
+        {#each TOOLS.filter(([k]) => k !== 'design') as [k, label]}
           <li class={ok(!!tattooLog[k])}>{label}: {tattooLog[k] ? `${tattooLog[k].ms} мс на ${tattooLog[k].work}` : 'открой во вкладке Тату'}</li>
         {/each}
         <li class={ok(!!stencilInfo)}>Трафарет PDF: {stencilInfo ? `${stencilInfo.designMm[0]}×${stencilInfo.designMm[1]} мм; распечатай в 100 % и сверь линейку` : 'Тату → Линии → «Трафарет PDF 1:1»'}</li>

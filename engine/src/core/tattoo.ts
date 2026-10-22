@@ -13,7 +13,7 @@ import { DEFAULT_SKIN, type SkinParams } from './skin';
 import { gauss } from './drawing';
 import { components } from './simplify';
 
-export type TattooTool = 'contrast' | 'pigments' | 'lines' | 'distance' | 'spread' | 'skin';
+export type TattooTool = 'design' | 'contrast' | 'pigments' | 'lines' | 'distance' | 'spread' | 'skin';
 
 export interface LinesParams {
   /** design: dark pixels of the design itself (L* below inkL); drawing: the Drawing result. */
@@ -56,7 +56,7 @@ export interface TattooParams {
 }
 
 export const DEFAULT_TATTOO: TattooParams = {
-  tool: 'contrast',
+  tool: 'design',
   widthCm: 10,
   contrast: DEFAULT_CONTRAST,
   pigments: DEFAULT_PIGMENTS,
