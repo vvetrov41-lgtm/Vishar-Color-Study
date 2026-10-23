@@ -4,7 +4,7 @@
 import * as Comlink from 'comlink';
 import type { ViewState } from './core/view';
 import type { PaletteParams } from './core/palette';
-import type { Caps, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from './types';
+import type { Caps, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, StencilExport, SvgExport, ViewResult } from './types';
 import type { EngineApi } from './worker/engine.worker';
 
 type Resolver = { ok: (r: ViewResult) => void; fail: (e: unknown) => void };
@@ -94,6 +94,11 @@ export class EngineClient {
     return this.api.palette(params);
   }
 
+  /** Pigment or tone under (u, v) in Тату → Пигменты: index, −2 = skin, null = none. */
+  pickPigment(u: number, v: number): Promise<number | null> {
+    return this.api.pickPigment(u, v);
+  }
+
   /** Pipette at (u, v), 0..1 of the working copy. */
   pickColor(u: number, v: number, size: number): Promise<PickResult | null> {
     return this.api.pickColor(u, v, size);
@@ -115,6 +120,18 @@ export class EngineClient {
   async exportInkPng(): Promise<Blob> {
     await this.settled();
     return this.api.exportInkPng();
+  }
+
+  /** Stencil PDF 1:1 from Тату → Линии. */
+  async exportStencil(): Promise<StencilExport> {
+    await this.settled();
+    return this.api.exportStencil();
+  }
+
+  /** Design calibrated for the chosen skin tone, without the skin. */
+  async exportCalibrated(): Promise<Blob> {
+    await this.settled();
+    return this.api.exportCalibrated();
   }
 
   async exportWork(): Promise<Blob> {

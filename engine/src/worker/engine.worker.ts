@@ -7,15 +7,20 @@ import { colorInfo, type Lab } from '../core/colorinfo';
 import { deltaHistogram, matchedShare } from '../core/highlight';
 import { DrawingCache, lightness, type DrawingResult } from '../core/drawing';
 import { DEFAULT_PALETTE, extractPalette, meanRgb, sampleGrid, square, type Grid, type PaletteParams } from '../core/palette';
-import { simplify, type SimplifyResult } from '../core/simplify';
+import { simplify, type SimplifyParams, type SimplifyResult } from '../core/simplify';
 import { maskToSvg } from '../core/vector';
+import { contrastMap, contrastSimplify } from '../core/contrast';
+import { stencilPdf } from '../core/pdf';
+import { focusOn, greyTones, PHOTO_SHIFT, pigmentMap, pigmentSimplify } from '../core/pigments';
+import { calibrateImage, calOf, isNeutral, onSkin, skinRgb, skinView } from '../core/skin';
+import { checkLines, designInk, spreadPreview, viewFromDistance, type TattooParams } from '../core/tattoo';
 import { ORIGINAL_VALUES_9, levelAgreement } from '../core/compat';
 import { histogramsFromLab8, type Histograms } from '../core/histogram';
 import { fitLongSide, HEADER_BYTES, parseImageInfo } from '../core/imageinfo';
-import { DEFAULT_VIEW, planView, renderReference, type Smoothing, type ViewPlan, type ViewState } from '../core/view';
+import { DEFAULT_VIEW, planView, renderReference, type Smoothing, type TattooStats, type ViewPlan, type ViewState } from '../core/view';
 import { levelOf, valuesThresholds } from '../core/values';
 import { Renderer, type ScreenRect } from '../gpu/renderer';
-import type { Caps, CompatCase, OpenOptions, OpenResult, PaletteResult, ParityCase, ParityReport, PickResult, SvgExport, ViewResult } from '../types';
+import type { Caps, CompatCase, OpenOptions, OpenResult, PaletteResult, ParityCase, ParityReport, PickResult, StencilExport, SvgExport, ViewResult } from '../types';
 
 const now = () => performance.now();
 const round1 = (v: number) => Math.round(v * 10) / 10;
@@ -44,6 +49,13 @@ class Engine {
   private simplified: { key: string; res: SimplifyResult; ms: number } | null = null;
   private drawn: { key: string; res: DrawingResult; ms: number } | null = null;
   private drawCache = new Map<Smoothing, DrawingCache>();
+  // Tattoo tools: the current result, plus the simplification the contrast map is built from.
+  private tat: { key: string; rgba: Uint8ClampedArray; stats: TattooStats; ink?: Uint8Array } | null = null;
+  private tatSeg: { key: string; res: SimplifyResult } | null = null;
+  // The design calibrated for the chosen skin tone, per smoothing level (only the current calibration).
+  private calibrated = new Map<Smoothing, { key: string; px: Uint8Array; lab8: Uint8Array }>();
+  /** Pigments before a focus is applied: the per-pixel index lets a tap find its pigment. */
+  private pig: { key: string; rgba: Uint8ClampedArray; index: Int8Array; index2?: Int8Array; stats: NonNullable<TattooStats['pigments']>; ms: number } | null = null;
   private uploaded = '';
   private progress: ((share: number, stage: string) => void) | null = null;
 
@@ -55,6 +67,8 @@ class Engine {
     this.dHist = null;
     this.simplified = this.drawn = null;
     this.drawCache.clear();
+    this.tat = this.tatSeg = this.pig = null;
+    this.calibrated.clear();
     this.uploaded = '';
   }
 
@@ -81,7 +95,12 @@ class Engine {
       }
       return { rgba: this.simplified.res.rgba, key, ms: 0 };
     }
-    const key = `d:${lv}:${JSON.stringify(state.drawing)}`;
+    if (state.view === 'tattoo') return this.tattoo(state);
+    return this.drawing(state);
+  }
+
+  private drawing(state: ViewState): { rgba: Uint8ClampedArray; key: string; ms: number } {
+    const r = this.renderer, lv = state.smoothing, key = `d:${lv}:${JSON.stringify(state.drawing)}`;
     if (this.drawn?.key !== key) {
       const t0 = now();
       let c = this.drawCache.get(lv);
@@ -91,6 +110,93 @@ class Engine {
       return { rgba: res.rgba, key, ms: this.drawn.ms };
     }
     return { rgba: this.drawn.res.rgba, key, ms: 0 };
+  }
+
+  /** Key of the calibrated version the tattoo tools work with; '' = the design as it is. */
+  private calKey(t: TattooParams): string {
+    const cal = calOf(t.skin);
+    return t.skin.use && !isNeutral(cal) ? JSON.stringify(cal) : '';
+  }
+
+  /** Pixels and analysis the tattoo tools read: the version calibrated for the chosen skin when «use» is on. */
+  private design(lv: Smoothing, t: TattooParams): { px: Uint8Array; lab8: Uint8Array } {
+    const key = this.calKey(t);
+    if (!key) return { px: this.pixels(lv), lab8: this.analyzed(lv).a.lab8 };
+    let c = this.calibrated.get(lv);
+    if (c?.key !== key) this.calibrated.set(lv, (c = { key, ...calibrateImage(this.pixels(lv), this.renderer.w * this.renderer.h, calOf(t.skin)) }));
+    return c;
+  }
+
+  /** Current tattoo tool (plan 5.1–5.4); only the parameters of that tool are in the key. */
+  private tattoo(state: ViewState): { rgba: Uint8ClampedArray; key: string; ms: number } {
+    const r = this.renderer, lv = state.smoothing, t = state.tattoo, w = r.w, h = r.h, n = w * h;
+    // Pigments are shown on the chosen skin while working with its calibrated version.
+    const onTone = t.skin.use && t.tool === 'pigments' ? skinRgb(t.skin) : null;
+    const srcKey = t.tool === 'skin' ? '' : `${this.calKey(t)}:${onTone ?? ''}`;
+    const own = t.tool === 'skin' ? t.skin : t.tool === 'contrast' ? t.contrast : t.tool === 'pigments' ? t.pigments : t.tool === 'lines' ? [t.lines, t.lines.source === 'drawing' ? state.drawing : null]
+      : t.tool === 'distance' ? t.distance : t.tool === 'spread' ? t.spread : null;
+    const key = `t:${lv}:${t.tool}:${t.widthCm}:${srcKey}:${JSON.stringify(own)}`;
+    if (this.tat?.key === key) return { rgba: this.tat.rgba, key, ms: 0 };
+    const t0 = now(), stats: TattooStats = { tool: t.tool, ms: 0 };
+    let rgba: Uint8ClampedArray, ink: Uint8Array | undefined;
+    const segment = (sp: SimplifyParams): SimplifyResult => {
+      const skey = `${lv}:${this.calKey(t)}:${JSON.stringify(sp)}`;
+      if (this.tatSeg?.key !== skey) {
+        const d = this.design(lv, t), d0 = this.design(0, t);
+        const res = simplify({ w, h, px: d.px, lab8: d.lab8, px0: d0.px, lab0: d0.lab8 }, sp, (s, stage) => this.progress?.(s * 0.9, stage));
+        this.tatSeg = { key: skey, res };
+      }
+      return this.tatSeg.res;
+    };
+    if (t.tool === 'pigments') {
+      const pg = t.pigments, { focus: _f, ...base } = pg, pkey = `${lv}:${this.calKey(t)}:${JSON.stringify(pg.mode === 'bg' ? [base.source, base.details, base.tonesL, base.blend] : { ...base, series: 0, tonesL: 0 })}`;
+      if (this.pig?.key !== pkey) {
+        const tp = now(), photo = pg.source === 'photo';
+        const src = photo ? this.design(lv, t).px : segment(pigmentSimplify(pg)).rgba, shift = photo ? PHOTO_SHIFT : 0;
+        const colors = photo ? 0 : this.tatSeg!.res.colors;
+        if (pg.mode === 'bg') {
+          const res = greyTones(src, w, h, pg.tonesL, shift, pg.blend);
+          this.pig = { key: pkey, rgba: res.rgba, index: res.index, stats: { tones: [...pg.tonesL], shares: res.shares, skinShare: res.skinShare, colors }, ms: now() - tp };
+        } else {
+          const res = pigmentMap(src, w, h, pg, shift);
+          this.pig = { key: pkey, rgba: res.rgba, index: res.index, index2: res.index2, stats: { inks: res.inks, skinShare: res.skinShare, misses: res.misses, meanDE: res.meanDE, colors }, ms: now() - tp };
+        }
+      }
+      rgba = pg.focus === -1 ? this.pig.rgba : focusOn(this.pig.rgba, this.pig.index, pg.focus, this.pig.index2);
+      if (onTone) rgba = onSkin(rgba, n, onTone);
+      stats.pigments = this.pig.stats;
+    } else if (t.tool === 'design') {
+      // The design as it is (taken into work, or its skin version): nothing simplified.
+      rgba = new Uint8ClampedArray(this.design(lv, t).px);
+    } else if (t.tool === 'contrast') {
+      segment(contrastSimplify(t.contrast));
+      const c = contrastMap(this.tatSeg!.res.rgba, w, h, t.contrast);
+      rgba = c.rgba;
+      stats.contrast = { pairs: c.pairs, weakPairs: c.weakPairs, weakShare: c.weakShare, colors: this.tatSeg!.res.colors };
+    } else if (t.tool === 'lines') {
+      if (t.lines.source === 'drawing') {
+        this.drawing(state);
+        const inkF = this.drawn!.res.ink;
+        ink = new Uint8Array(n);
+        for (let i = 0; i < n; i++) ink[i] = inkF[i] > 0.5 ? 1 : 0;
+      } else ink = designInk(this.design(lv, t).lab8, n, t.lines.inkL);
+      const res = checkLines(ink, w, h, t.widthCm, t.lines);
+      rgba = res.rgba;
+      stats.lines = { pxPerMm: res.pxPerMm, inkShare: res.inkShare, thinShare: res.thinShare, gapShare: res.gapShare, lowResolution: res.lowResolution };
+    } else if (t.tool === 'distance') {
+      const res = viewFromDistance(this.design(lv, t).px, w, h, t.widthCm, t.distance);
+      rgba = res.rgba;
+      stats.distance = { blurPx: res.blurPx, iou: res.iou, figure: res.figure };
+    } else if (t.tool === 'spread') {
+      const res = spreadPreview(this.design(lv, t).px, w, h, t.widthCm, t.spread);
+      rgba = res.rgba;
+      stats.spread = { spreadPx: res.spreadPx, blurPx: res.blurPx };
+    } else rgba = skinView(this.pixels(lv), w, h, t.skin);
+    this.progress?.(1, 'done');
+    const ms = now() - t0;
+    stats.ms = round1(ms);
+    this.tat = { key, rgba, stats, ink };
+    return { rgba, key, ms };
   }
 
   /** Makes the GPU result texture hold the state's Simplify / Drawing; returns compute and upload ms. */
@@ -247,7 +353,8 @@ class Engine {
       if (state.view === 'simplify' && this.simplified) {
         const s = this.simplified.res;
         stats.simplify = { regions: s.regions, colors: s.colors, inkShare: Math.round(s.inkShare * 1e4) / 1e4, ms: s.ms };
-      } else if (this.drawn) stats.drawing = { inkShare: Math.round(this.drawn.res.inkShare * 1e4) / 1e4 };
+      } else if (state.view === 'tattoo' && this.tat) stats.tattoo = this.tat.stats;
+      else if (this.drawn) stats.drawing = { inkShare: Math.round(this.drawn.res.inkShare * 1e4) / 1e4 };
     }
     const t2 = now();
     r.renderScreen(plan, state.smoothing, this.rect(), this.screen.bg);
@@ -291,6 +398,14 @@ class Engine {
     return levelOf(tone, this.plan.thresholds);
   }
 
+  /** Pigment or tone under (u, v), 0..1 of the working copy: its index, −2 = skin, null = none shown. */
+  pickPigment(u: number, v: number): number | null {
+    const r = this.renderer;
+    if (u < 0 || v < 0 || u >= 1 || v >= 1 || this.state.view !== 'tattoo' || this.state.tattoo.tool !== 'pigments' || !this.pig) return null;
+    const k = this.pig.index[Math.floor(v * r.h) * r.w + Math.floor(u * r.w)];
+    return k < 0 ? -2 : k;
+  }
+
   /** Palette of the unsmoothed working copy. */
   palette(params: PaletteParams = DEFAULT_PALETTE): PaletteResult {
     const t0 = now(), px = this.pixels(), t1 = now(), g = this.sample(), t2 = now(), p = extractPalette(px, g, params);
@@ -304,7 +419,8 @@ class Engine {
   pickColor(u: number, v: number, size: number): PickResult | null {
     const r = this.renderer, t0 = now();
     if (u < 0 || v < 0 || u >= 1 || v >= 1) return null;
-    const px = this.pixels(), x = Math.floor(u * r.w), y = Math.floor(v * r.h);
+    // In Тату the pipette reads the design the tools work on (its skin version, when chosen).
+    const px = this.state.view === 'tattoo' ? this.design(0, this.state.tattoo).px : this.pixels(), x = Math.floor(u * r.w), y = Math.floor(v * r.h);
     const rgb = meanRgb(px, square(x, y, size, r.w, r.h));
     const patch = new Uint8Array(LOUPE * LOUPE * 4), o = LOUPE >> 1;
     for (let j = 0; j < LOUPE; j++) for (let i = 0; i < LOUPE; i++) {
@@ -336,6 +452,29 @@ class Engine {
     for (let i = 0; i < ink.length; i++) { px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = v; px[i * 4 + 3] = Math.round(ink[i] * 255); }
     const c = new OffscreenCanvas(r.w, r.h);
     c.getContext('2d')!.putImageData(new ImageData(px, r.w, r.h), 0, 0);
+    return c.convertToBlob({ type: 'image/png' });
+  }
+
+  /**
+   * Stencil PDF at 1:1 from the line check's ink mask (Тату → Линии): A4 or larger, a 10 mm
+   * scale bar, mirrored on request.
+   */
+  async exportStencil(): Promise<StencilExport> {
+    const r = this.renderer, t = this.state.tattoo;
+    if (this.state.view !== 'tattoo' || t.tool !== 'lines' || !this.tat?.ink) throw new Error('трафарет делается во вкладке Тату → Линии');
+    const t0 = now(), ink = this.tat.ink, gray = new Uint8Array(ink.length);
+    for (let i = 0; i < ink.length; i++) gray[i] = ink[i] ? 0 : 255;
+    const s = await stencilPdf(gray, r.w, r.h, { widthCm: t.widthCm, mirror: t.lines.mirror, label: 'Vishar Color Study stencil' });
+    const res: StencilExport = { pdf: s.pdf, pageMm: s.pageMm, designMm: s.designMm, ms: round1(now() - t0) };
+    return Comlink.transfer(res, [s.pdf.buffer]);
+  }
+
+  /** The design calibrated for the chosen skin tone (Тату → Кожа), without the skin, as PNG. */
+  async exportCalibrated(): Promise<Blob> {
+    const r = this.renderer, t = this.state.tattoo, n = r.w * r.h, px = this.pixels(this.state.smoothing);
+    const out = isNeutral(calOf(t.skin)) ? px : calibrateImage(px, n, calOf(t.skin), false).px;
+    const c = new OffscreenCanvas(r.w, r.h);
+    c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(out), r.w, r.h), 0, 0);
     return c.convertToBlob({ type: 'image/png' });
   }
 
@@ -381,6 +520,8 @@ class Engine {
       ['simplify posterize, 4 цвета, тёмные элементы', { ...base, view: 'simplify', simplify: { ...base.simplify, mode: 'posterize', paletteLimit: 4, keepDark: true } }],
       ['drawing sketch', { ...base, view: 'drawing' }],
       ['drawing contours stroke 3 invert', { ...base, view: 'drawing', smoothing: 1, drawing: { mode: 'contours', line: 60, stroke: 3, invert: true } }],
+      ['тату: контраст', { ...base, view: 'tattoo', tattoo: { ...base.tattoo, tool: 'contrast' } }],
+      ['тату: линии 0,5 мм', { ...base, view: 'tattoo', tattoo: { ...base.tattoo, tool: 'lines' } }],
     ];
     for (const [name, url] of Object.entries(fixtures)) {
       const blob = await (await fetch(url)).blob();

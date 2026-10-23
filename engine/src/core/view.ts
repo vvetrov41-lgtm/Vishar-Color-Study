@@ -9,10 +9,13 @@ import { DASH, DEFAULT_HIGHLIGHT, HIGHLIGHT_MODE_CODE, type HighlightParams } fr
 import type { Histograms } from './histogram';
 import { DEFAULT_NOTAN, notanThresholds, type NotanParams } from './notan';
 import { DEFAULT_SIMPLIFY, type SimplifyParams } from './simplify';
+import type { ContrastPair } from './contrast';
+import type { MissColor, UsedInk } from './pigments';
+import { DEFAULT_TATTOO, type FigureGround, type TattooParams } from './tattoo';
 import { DEFAULT_TEMPERATURE, TEMP_COOL, TEMP_WARM, tempColor, temperatureStats, type TemperatureParams } from './temperature';
 import { DEFAULT_VALUES, levelOf, levelStats, valuesThresholds, type ValuesParams } from './values';
 
-export type ViewKind = 'original' | 'values' | 'notan' | 'temperature' | 'highlight' | 'simplify' | 'drawing';
+export type ViewKind = 'original' | 'values' | 'notan' | 'temperature' | 'highlight' | 'simplify' | 'drawing' | 'tattoo';
 export type Smoothing = 0 | 1 | 2;
 
 export interface ViewState {
@@ -25,6 +28,7 @@ export interface ViewState {
   highlight: HighlightParams;
   simplify: SimplifyParams;
   drawing: DrawingParams;
+  tattoo: TattooParams;
 }
 
 export const DEFAULT_VIEW: ViewState = {
@@ -36,10 +40,12 @@ export const DEFAULT_VIEW: ViewState = {
   highlight: DEFAULT_HIGHLIGHT,
   simplify: DEFAULT_SIMPLIFY,
   drawing: DEFAULT_DRAWING,
+  tattoo: DEFAULT_TATTOO,
 };
 
-// Simplify and Drawing are computed on the CPU in the Worker; the GPU only shows the result (5).
-export const VIEW_CODE: Record<ViewKind, number> = { original: 0, values: 1, notan: 2, temperature: 3, highlight: 4, simplify: 5, drawing: 5 };
+// Simplify, Drawing and the tattoo tools are computed on the CPU in the Worker; the GPU only
+// shows the result (5).
+export const VIEW_CODE: Record<ViewKind, number> = { original: 0, values: 1, notan: 2, temperature: 3, highlight: 4, simplify: 5, drawing: 5, tattoo: 5 };
 export const TEMP_STYLE_CODE = { map: 0, shaded: 1, two: 2 } as const;
 export const MAX_LEVELS = 20;
 
@@ -75,6 +81,18 @@ export interface ViewStats {
   highlight?: { share: number };
   simplify?: { regions: number; colors: number; inkShare: number; ms: { segment: number; merge: number; paint: number; total: number } };
   drawing?: { inkShare: number };
+  tattoo?: TattooStats;
+}
+
+/** Numbers behind the current tattoo tool (plan 5.1–5.4). */
+export interface TattooStats {
+  tool: TattooParams['tool'];
+  ms: number;
+  contrast?: { pairs: ContrastPair[]; weakPairs: number; weakShare: number; colors: number };
+  pigments?: { inks: UsedInk[]; skinShare: number; misses: MissColor[]; meanDE: number; colors: number } | { tones: number[]; shares: number[]; skinShare: number; colors: number };
+  lines?: { pxPerMm: number; inkShare: number; thinShare: number; gapShare: number; lowResolution: boolean };
+  distance?: { blurPx: number; iou: number; figure: FigureGround };
+  spread?: { spreadPx: number; blurPx: number };
 }
 
 export function planView(state: ViewState, h: Histograms): { plan: ViewPlan; stats: ViewStats } {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Debug page for stages 1–3: not the Color Study interface. It drives the engine,
+  // Debug page for stages 1–4: not the Color Study interface. It drives the engine,
   // shows the numbers behind each view and checks the stage acceptance targets on a device.
   import { onMount } from 'svelte';
   import { EngineClient } from '../src/client';
@@ -7,6 +7,11 @@
   import { colorInfo, compareColors, deltaE2000, hex, type ColorInfo } from '../src/core/colorinfo';
   import { DEFAULT_PALETTE, type Swatch } from '../src/core/palette';
   import { DEFAULT_VIEW, type ViewState } from '../src/core/view';
+  import { DEFAULT_TATTOO, SKIN_TONES, type TattooTool } from '../src/core/tattoo';
+  import { NEUTRAL, OWN_TONE, skinRgb, tileAt, type Calibration } from '../src/core/skin';
+  import { nearestPaints, paintAlternatives, parseArtCatalogue, type ArtCatalogue, type ArtPaint, type ArtSet } from '../src/core/artpaints';
+  import { alternatives, evenTones, GREY_SERIES, INK_BRANDS, inkById, inkRecipe, nearestInks } from '../src/core/pigments';
+  import { HINTS } from './hints';
   import type { OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
 
   const VERSION = __ENGINE_VERSION__;
@@ -27,7 +32,15 @@
   const TARGET2 = { paletteMs: 500, highlightMs: 50, markerDE: 2 };
   // Stage 3 targets: Clustering ≤ 1 s on the working copy, Graph ≤ 3 s with a progress indicator.
   const TARGET3 = { clusteringMs: 1000, graphMs: 3000, drawSliderMs: 50 };
-  const TABS = [['original', 'Оригинал'], ['values', 'Values'], ['notan', 'Notan'], ['temperature', 'Temp'], ['highlight', 'Highlight'], ['simplify', 'Simplify'], ['drawing', 'Drawing']] as const;
+  const TABS = [['original', 'Оригинал'], ['palette', 'Палитра'], ['values', 'Values'], ['notan', 'Notan'], ['temperature', 'Temp'], ['highlight', 'Highlight'], ['simplify', 'Simplify'], ['drawing', 'Drawing'], ['tattoo', 'Тату']] as const;
+  const TOOLS: Array<[TattooTool, string]> = [['design', 'Эскиз'], ['contrast', 'Контраст'], ['pigments', 'Пигменты'], ['lines', 'Линии'], ['distance', 'Расстояние'], ['spread', 'Расплывание'], ['skin', 'Кожа']];
+  const SKIN_NAMES = ['I', 'II', 'III', 'IV', 'V', 'VI'];
+  const toneName = (k: number) => (k === OWN_TONE ? 'свой тон' : `тон ${SKIN_NAMES[k]}`);
+  // Calibration sliders of the skin tool: key, label, min, max, unit.
+  const CAL: Array<[keyof Calibration, string, number, number, string]> = [
+    ['brightness', 'Яркость', -40, 40, ''], ['contrast', 'Контраст', 50, 200, '%'], ['shadows', 'Тени', -40, 40, ''],
+    ['highlights', 'Света', -40, 40, ''], ['saturation', 'Насыщенность', 0, 200, '%'], ['warmth', 'Тепло', -30, 30, ''],
+  ];
   const SIZES = [1, 3, 5, 11];
   const KINDS = [['dominant', 'Dominant'], ['range', 'Range'], ['accents', 'Accents']] as const;
   type Kind = (typeof KINDS)[number][0];
@@ -49,7 +62,93 @@
   // Stage 2: pipette, palette, colour card, compare, Highlight.
   let stageW = $state(0);
   let stageH = $state(0);
-  let tool: 'pipette' | 'level' = $state('pipette');
+  // Page section: a view of the engine, or the palette (shown over the original).
+  type Section = (typeof TABS)[number][0];
+  let section = $state<Section>('original');
+  // A tap on the photo: picks the level in Values, the target in Highlight, a colour elsewhere.
+  // Only where a tap means something: a colour on the original or palette, the target in Highlight,
+  // the level in Values, the pigment in Тату → Пигменты. Elsewhere a tap does nothing.
+  const tool: 'pipette' | 'level' | 'none' = $derived(
+    section === 'original' || section === 'palette' || section === 'highlight' || (section === 'tattoo' && vs.tattoo.tool === 'pigments') ? 'pipette'
+      : section === 'values' ? 'level' : 'none');
+  const inkPipette = $derived(section === 'tattoo' && vs.tattoo.tool === 'pigments');
+
+  // Work chain: the original, then each result taken into work. A result becomes the photo every
+  // section works on (at working-copy resolution), so e.g. pigments follow a calibrated version.
+  let chain: Array<{ label: string; blob: Blob }> = $state([]);
+
+  function stepName(): string {
+    const tab = TABS.find(([v]) => v === section)?.[1] ?? section;
+    return section === 'tattoo' ? `${tab}: ${TOOLS.find(([k]) => k === vs.tattoo.tool)?.[1] ?? vs.tattoo.tool}` : tab;
+  }
+
+  /** Takes what is on screen into work and goes back to «Оригинал» showing it. */
+  async function commit() {
+    if (!engine || !opened) return;
+    try {
+      busy = 'Беру результат в работу…';
+      const blob = await engine.exportWork(), name = stepName();
+      vs.tattoo.pigments.focus = -1;
+      vs.tattoo.tool = 'design';
+      await openBlob(blob, name, true);
+      chain = [...chain, { label: name, blob }];
+      palette = null; current = null; picked = null;
+      openSection('original');
+    } catch (e) {
+      error = String((e as Error)?.message ?? e);
+      busy = '';
+    }
+  }
+
+  /** One step back along the chain, or back to the original. */
+  async function stepBack(toStart = false) {
+    if (chain.length < 2) return;
+    const next = toStart ? chain.slice(0, 1) : chain.slice(0, -1), top = next[next.length - 1];
+    await openBlob(top.blob, top.label, true);
+    chain = next;
+    palette = null; current = null; picked = null;
+  }
+
+  // Art paints: the catalogue loads on demand when a paint type is chosen in the palette.
+  let artCat = $state<ArtCatalogue | null>(null);
+  let artSet = $state<ArtSet>({ type: '', brand: '', tint: false });
+  let artAlt = $state<string | null>(null);
+  let artErr = $state('');
+  async function chooseArtType(type: string) {
+    artSet = { ...artSet, type, brand: '' };
+    artAlt = null;
+    if (!type || artCat) return;
+    try {
+      const res = await fetch('art-paints.json');
+      if (!res.ok) throw new Error(`${res.status}`);
+      artCat = parseArtCatalogue(await res.json());
+    } catch (e) {
+      artErr = `Каталог красок не загрузился: ${(e as Error).message}`;
+    }
+  }
+  const artBrands = $derived(artCat && artSet.type ? [...new Set(artCat.paints.filter((p) => p.type === artSet.type).map((p) => p.brand))].sort() : []);
+  const artOn = $derived(!!artCat && !!artSet.type);
+
+  // Ink whose alternatives are open in Тату → Пигменты.
+  let altFor: string | null = $state(null);
+
+  /** The studio has no `id`: never pick it; with `by`, that ink goes into the set instead. */
+  function replaceInk(id: string, by: string | null) {
+    const p = vs.tattoo.pigments;
+    vs.tattoo.pigments = {
+      ...p, focus: -1,
+      excluded: p.include.includes(id) ? p.excluded : [...new Set([...p.excluded, id])],
+      include: [...p.include.filter((x) => x !== id), ...(by ? [by] : [])],
+    };
+    altFor = null;
+  }
+
+  /** Shows one pigment (or tone, −2 = skin) on the image; the same again shows all. */
+  function focusPigment(k: number) {
+    vs.tattoo.pigments.focus = vs.tattoo.pigments.focus === k ? -1 : k;
+  }
+  // Explanation sheet opened by an «i» next to a control.
+  let hint: string | null = $state(null);
   let sampleSize = $state(5);
   let picked: PickResult | null = $state(null);
   let loupeAt: { x: number; y: number } | null = $state(null);
@@ -72,6 +171,9 @@
   let drawSlider = $state({ n: 0, max: 0, samples: [] as number[] });
   let lastDraw = { base: '', line: -1 };
   let svgInfo: (Omit<SvgExport, 'svg'> & { bytes: number }) | null = $state(null);
+  // Stage 4: time of the first computation of each tattoo tool on this photo, stencil export.
+  let tattooLog = $state({} as Record<string, { ms: number; work: string }>);
+  let stencilInfo: { pageMm: [number, number]; designMm: [number, number]; ms: number; bytes: number } | null = $state(null);
 
   // Main-thread stall monitor: a 16 ms timer that measures its own lateness.
   function jank() {
@@ -105,6 +207,8 @@
           set: async (patch: Partial<ViewState>) => { Object.assign(vs, patch); await apply(); return report(); },
           palette: async () => { await runPalette(); return { palette: $state.snapshot(palette), markers: $state.snapshot(markerCheck) }; },
           pick: (u: number, v: number, size: number) => engine?.pickColor(u, v, size),
+          tattoo: async (tool: TattooTool) => { vs.view = 'tattoo'; vs.tattoo = { ...vs.tattoo, tool }; await apply(); return report(); },
+          stencil: async () => { const r = await engine!.exportStencil(); return { pageMm: r.pageMm, designMm: r.designMm, ms: r.ms, bytes: r.pdf.length, head: new TextDecoder().decode(r.pdf.subarray(0, 8)) }; },
           svg: async () => { const s = await engine!.exportSvg(); return { loops: s.loops, points: s.points, ms: s.ms, bytes: s.svg.length, head: s.svg.slice(0, 200) }; },
           report,
         },
@@ -118,6 +222,7 @@
     error = '';
     busy = `Открываю ${label}…`;
     lastBlob = { blob, label };
+    if (!keep) vs.tattoo.tool = 'design';
     stall.max = 0;
     const t0 = performance.now();
     try {
@@ -130,6 +235,7 @@
       logCompute(v);
       drawHist();
       if (keep) return;
+      chain = [{ label: 'Оригинал', blob }];
       slider = { n: 0, max: 0, sum: 0, samples: [] };
       hlSlider = { n: 0, max: 0, samples: [] };
       palette = null;
@@ -139,6 +245,8 @@
       computeLog = {};
       drawSlider = { n: 0, max: 0, samples: [] };
       svgInfo = null;
+      tattooLog = {};
+      stencilInfo = null;
     } catch (e) {
       error = String((e as Error)?.message ?? e);
     } finally {
@@ -147,6 +255,10 @@
   }
 
   function logCompute(r: ViewResult) {
+    if (vs.view === 'tattoo' && r.timings.computeMs > 0) {
+      tattooLog[vs.tattoo.tool] = { ms: r.timings.computeMs, work: `${r.work.width}×${r.work.height}` };
+      return;
+    }
     if ((vs.view !== 'simplify' && vs.view !== 'drawing') || !(r.timings.computeMs > 0)) return;
     const key = vs.view === 'simplify' ? vs.simplify.mode : vs.drawing.mode;
     computeLog[key] = { ms: r.timings.computeMs, algoMs: r.stats.simplify?.ms.total, work: `${r.work.width}×${r.work.height}`, regions: r.stats.simplify?.regions, colors: r.stats.simplify?.colors };
@@ -175,6 +287,7 @@
     last = r;
     progress = 0;
     // Frames that had to re-run the analysis (new smoothing) are not slider frames.
+    if (vs.view === 'tattoo') { logCompute(r); return; }
     if (vs.view === 'simplify' || vs.view === 'drawing') {
       logCompute(r);
       // Line slider frames only: same style, Stroke and smoothing, a new Line value.
@@ -215,20 +328,39 @@
     vs.view = v;
   }
 
+  /** Black & Grey: a brand series sets the number of tones and their names, L* evenly to start. */
+  function setSeries(k: number) {
+    vs.tattoo.pigments = { ...vs.tattoo.pigments, series: k, tonesL: evenTones(k >= 0 ? GREY_SERIES[k].names.length : vs.tattoo.pigments.tonesL.length) };
+  }
+
+  /** Switching sections drops what belonged to the previous one: the colour card and the loupe. */
+  function openSection(v: Section) {
+    if (v !== section) { current = null; picked = null; loupeAt = null; hint = null; }
+    section = v;
+    setView(v === 'palette' ? 'original' : v);
+  }
+
   function compat() {
     vs.values = { ...vs.values, scale: 'luma', method: 'kmeans', levels: 9, brightness: 0 };
   }
 
   async function tap(e: PointerEvent) {
     if (!engine) return;
+    // Тату → Кожа, all tones: a tap on a tile opens that tone.
+    if (vs.view === 'tattoo' && vs.tattoo.tool === 'skin' && vs.tattoo.skin.show === 'all' && last) {
+      const r = canvas.getBoundingClientRect();
+      const u = ((e.clientX - r.left) / r.width - last.rect.x) / last.rect.w, v = ((e.clientY - r.top) / r.height - last.rect.y) / last.rect.h;
+      if (u >= 0 && u <= 1 && v >= 0 && v <= 1) vs.tattoo.skin = { ...vs.tattoo.skin, tone: tileAt(u, v), show: 'one' };
+      return;
+    }
     // In Highlight a tap (or drag) on the photo picks the colour to find.
-    if (tool === 'pipette' || vs.view === 'highlight') {
+    if (tool === 'pipette') {
       canvas.setPointerCapture(e.pointerId);
       pressed = true;
       void pipette(e);
       return;
     }
-    if (vs.view !== 'values') return;
+    if (tool !== 'level') return;
     const r = canvas.getBoundingClientRect();
     const lev = await engine.pick(e.clientX - r.left, e.clientY - r.top);
     vs.values.highlight = lev === vs.values.highlight ? -1 : lev;
@@ -264,7 +396,7 @@
   }
 
   function move(e: PointerEvent) {
-    if ((tool === 'pipette' || vs.view === 'highlight') && e.buttons) void pipette(e);
+    if (tool === 'pipette' && e.buttons) void pipette(e);
   }
 
   function release() {
@@ -337,7 +469,7 @@
   const swatches: Swatch[] = $derived(palette ? palette[pkind] : []);
   /** Marker and strip positions in stage CSS px. */
   const overlay = $derived.by(() => {
-    if (!last || !palette || !showMarkers || !swatches.length) return [];
+    if (section !== 'palette' || !last || !palette || !showMarkers || !swatches.length) return [];
     const r = last.rect, n = swatches.length, sw = Math.min(40, (stageW - 16) / n), x0 = (stageW - sw * n) / 2;
     return swatches.map((s, i) => ({
       s, i,
@@ -396,7 +528,7 @@
 
   function report() {
     return {
-      schema: 'vishar-stage3-report/1',
+      schema: 'vishar-stage4-report/1',
       build: VERSION,
       at: new Date().toISOString(),
       userAgent: navigator.userAgent,
@@ -429,6 +561,12 @@
         simplify: $state.snapshot(vs.simplify),
         drawing: $state.snapshot(vs.drawing),
       },
+      stage4: {
+        compute: $state.snapshot(tattooLog),
+        tattoo: $state.snapshot(vs.tattoo),
+        stats: last?.stats.tattoo ?? null,
+        stencil: stencilInfo,
+      },
     };
   }
 
@@ -446,9 +584,9 @@
 
   async function shareReport() {
     const text = JSON.stringify(report(), null, 1);
-    const file = new File([text], `vishar-stage3-${Date.now()}.json`, { type: 'application/json' });
+    const file = new File([text], `vishar-stage4-${Date.now()}.json`, { type: 'application/json' });
     try {
-      if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: 'Vishar Stage 3' });
+      if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: 'Vishar Stage 4' });
       else await navigator.share({ text });
     } catch {}
   }
@@ -488,6 +626,26 @@
     await shareFile(await engine.exportInkPng(), `vishar-${vs.drawing.mode}-transparent.png`);
   }
 
+  async function exportStencil() {
+    if (!engine) return;
+    try {
+      const s = await engine.exportStencil(), blob = new Blob([s.pdf as BlobPart], { type: 'application/pdf' });
+      stencilInfo = { pageMm: s.pageMm, designMm: s.designMm, ms: s.ms, bytes: blob.size };
+      await shareFile(blob, `vishar-stencil-${vs.tattoo.widthCm}cm${vs.tattoo.lines.mirror ? '-mirror' : ''}.pdf`);
+    } catch (e) {
+      error = String((e as Error)?.message ?? e);
+    }
+  }
+
+  async function exportCalibrated() {
+    if (!engine) return;
+    try {
+      await shareFile(await engine.exportCalibrated(), `vishar-skin-${vs.tattoo.skin.tone === OWN_TONE ? 'own' : SKIN_NAMES[vs.tattoo.skin.tone]}.png`);
+    } catch (e) {
+      error = String((e as Error)?.message ?? e);
+    }
+  }
+
   async function exportPng() {
     if (!engine) return;
     const blob = await engine.exportWork();
@@ -503,7 +661,7 @@
 
 <main>
   <header>
-    <h1>Vishar Engine · Stage 3</h1>
+    <h1>Vishar Engine · Stage 4</h1>
     <p class="sub">Отладочная страница ядра, не интерфейс приложения · {VERSION}</p>
   </header>
 
@@ -519,6 +677,7 @@
     </div>
   </section>
 
+  <div class="pinned">
   <div class="stage" bind:this={box} bind:clientWidth={stageW} bind:clientHeight={stageH}>
     <canvas bind:this={canvas} onpointerdown={tap} onpointermove={move} onpointerup={release} onpointercancel={release}></canvas>
     {#if overlay.length}
@@ -546,63 +705,57 @@
   </div>
   {#if error}<p class="error">{error}</p>{/if}
 
+  {#if opened}
+    <div class="chain">
+      <span class="muted">В работе: {chain.map((c) => c.label).join(' → ') || opened.label}</span>
+      {#if section !== 'original' && section !== 'palette'}<button class="primary" onclick={commit} disabled={!!busy}>Взять в работу</button>{/if}
+      {#if chain.length > 1}
+        <button onclick={() => stepBack()} disabled={!!busy}>Шаг назад</button>
+        <button onclick={() => stepBack(true)} disabled={!!busy}>К оригиналу</button>
+      {/if}
+      {@render i('chain')}
+    </div>
+  {/if}
+
   <nav class="tabs">
     {#each TABS as [v, label]}
-      <button class:active={vs.view === v} onclick={() => setView(v)}>{label}</button>
+      <button class:active={section === v} onclick={() => openSection(v)}>{label}</button>
     {/each}
   </nav>
+  </div>
 
   <section class="card controls">
-    <div class="row">
-      <span>Тап по фото</span>
-      <div class="seg">
-        <button class:active={tool === 'pipette'} onclick={() => (tool = 'pipette')}>пипетка</button>
-        <button class:active={tool === 'level'} onclick={() => (tool = 'level')}>уровень Values</button>
-      </div>
-    </div>
-    {#if tool === 'pipette'}
-      <div class="row">
-        <span>Размер пробы</span>
-        <div class="seg">
-          {#each SIZES as n}<button class:active={sampleSize === n} onclick={() => (sampleSize = n)}>{n === 1 ? '1 px' : `${n}×${n}`}</button>{/each}
-        </div>
-      </div>
+    {#if section === 'original'}
+      <p class="muted">Тапни по фото: пипетка покажет цвет и его коды.</p>
+    {:else if section === 'palette'}
+      <p class="muted">Палитра считается по оригиналу. Тап по образцу или по фото открывает карточку цвета.</p>
     {/if}
-    <div class="row">
-      <span>Сглаживание</span>
-      <div class="seg">
-        {#each [[0, 'нет'], [1, 'слабое'], [2, 'сильное']] as [v, label]}
-          <button class:active={vs.smoothing === v} onclick={() => (vs.smoothing = v as 0 | 1 | 2)}>{label}</button>
-        {/each}
-      </div>
-    </div>
-
     {#if vs.view === 'values'}
-      <label class="row">Уровни <b>{vs.values.levels}</b><input type="range" min="2" max="20" bind:value={vs.values.levels} /></label>
+      <label class="row"><span>Уровни {@render i('values.levels')}</span> <b>{vs.values.levels}</b><input type="range" min="2" max="20" bind:value={vs.values.levels} /></label>
       <div class="row">
-        <span>Шкала</span>
+        <span>Шкала {@render i('values.scale')}</span>
         <div class="seg">
           <button class:active={vs.values.scale === 'lstar'} onclick={() => (vs.values.scale = 'lstar')}>L*</button>
           <button class:active={vs.values.scale === 'luma'} onclick={() => (vs.values.scale = 'luma')}>luma</button>
         </div>
       </div>
       <div class="row">
-        <span>Пороги</span>
+        <span>Пороги {@render i('values.method')}</span>
         <div class="seg">
           <button class:active={vs.values.method === 'kmeans'} onclick={() => (vs.values.method = 'kmeans')}>k-means</button>
           <button class:active={vs.values.method === 'kmeans-sqrt'} onclick={() => (vs.values.method = 'kmeans-sqrt')}>√count</button>
           <button class:active={vs.values.method === 'even'} onclick={() => (vs.values.method = 'even')}>равные</button>
         </div>
       </div>
-      <label class="row">Яркость <b>{vs.values.brightness}</b><input type="range" min="-50" max="50" bind:value={vs.values.brightness} /></label>
-      <label class="row check"><input type="checkbox" bind:checked={vs.values.showHue} /> Show Hue</label>
+      <label class="row"><span>Яркость {@render i('values.brightness')}</span> <b>{vs.values.brightness}</b><input type="range" min="-50" max="50" bind:value={vs.values.brightness} /></label>
+      <label class="row check"><input type="checkbox" bind:checked={vs.values.showHue} /> Show Hue {@render i('values.showHue')}</label>
       <div class="row">
-        <button class="chip" onclick={compat}>Как в оригинале</button>
+        <button class="chip" onclick={compat}>Как в оригинале</button> {@render i('values.compat')}
         <span class="muted">тап по фото подсвечивает уровень{vs.values.highlight >= 0 ? ` · уровень ${vs.values.highlight + 1}` : ''}</span>
       </div>
     {:else if vs.view === 'notan'}
       <div class="row">
-        <span>Порог</span>
+        <span>Порог {@render i('notan.mode')}</span>
         <div class="seg">
           {#each [['otsu', 'Otsu'], ['median', 'медиана'], ['auto', 'авто']] as [v, label]}
             <button class:active={vs.notan.mode === v} onclick={() => (vs.notan.mode = v as 'otsu')}>{label}</button>
@@ -610,38 +763,38 @@
         </div>
       </div>
       <div class="row">
-        <span>Уровни</span>
+        <span>Уровни {@render i('notan.levels')}</span>
         <div class="seg">
           <button class:active={vs.notan.levels === 2} onclick={() => (vs.notan.levels = 2)}>2</button>
           <button class:active={vs.notan.levels === 3} onclick={() => (vs.notan.levels = 3)}>3</button>
         </div>
       </div>
       <div class="row">
-        <span>Шкала</span>
+        <span>Шкала {@render i('notan.scale')}</span>
         <div class="seg">
           <button class:active={vs.notan.scale === 'lstar'} onclick={() => (vs.notan.scale = 'lstar')}>L*</button>
           <button class:active={vs.notan.scale === 'luma'} onclick={() => (vs.notan.scale = 'luma')}>luma</button>
         </div>
       </div>
-      <label class="row">Баланс <b>{vs.notan.balance}</b><input type="range" min="-50" max="50" bind:value={vs.notan.balance} /></label>
-      <label class="row check"><input type="checkbox" bind:checked={vs.notan.invert} /> Инверсия</label>
+      <label class="row"><span>Баланс {@render i('notan.balance')}</span> <b>{vs.notan.balance}</b><input type="range" min="-50" max="50" bind:value={vs.notan.balance} /></label>
+      <label class="row check"><input type="checkbox" bind:checked={vs.notan.invert} /> Инверсия {@render i('notan.invert')}</label>
     {:else if vs.view === 'temperature'}
       <div class="row">
-        <span>Нейтраль</span>
+        <span>Нейтраль {@render i('temp.mode')}</span>
         <div class="seg">
           <button class:active={vs.temperature.mode === 'relative'} onclick={() => (vs.temperature.mode = 'relative')}>по фото</button>
           <button class:active={vs.temperature.mode === 'absolute'} onclick={() => (vs.temperature.mode = 'absolute')}>абсолютная</button>
         </div>
       </div>
       <div class="row">
-        <span>Вид</span>
+        <span>Вид {@render i('temp.style')}</span>
         <div class="seg">
           {#each [['map', 'карта'], ['shaded', 'со светлотой'], ['two', '2 цвета']] as [v, label]}
             <button class:active={vs.temperature.style === v} onclick={() => (vs.temperature.style = v as 'map')}>{label}</button>
           {/each}
         </div>
       </div>
-      <label class="row">Баланс <b>{vs.temperature.balance}</b><input type="range" min="-30" max="30" bind:value={vs.temperature.balance} /></label>
+      <label class="row"><span>Баланс {@render i('temp.balance')}</span> <b>{vs.temperature.balance}</b><input type="range" min="-30" max="30" bind:value={vs.temperature.balance} /></label>
     {:else if vs.view === 'highlight'}
       {#if vs.highlight.target}
         <div class="row">
@@ -653,9 +806,9 @@
       {:else}
         <p class="muted">Тапни по фото: подсветятся все места похожего цвета. Допуск задаёт, насколько похожего.</p>
       {/if}
-      <label class="row">Допуск ΔE2000 <b>{vs.highlight.tolerance}</b><input type="range" min="0" max="50" step="0.5" bind:value={vs.highlight.tolerance} /></label>
+      <label class="row"><span>Допуск ΔE2000 {@render i('hl.tolerance')}</span> <b>{vs.highlight.tolerance}</b><input type="range" min="0" max="50" step="0.5" bind:value={vs.highlight.tolerance} /></label>
       <div class="row">
-        <span>Вид</span>
+        <span>Вид {@render i('hl.mode')}</span>
         <div class="seg">
           <button class:active={vs.highlight.mode === 'highlight'} onclick={() => (vs.highlight.mode = 'highlight')}>подсветка</button>
           <button class:active={vs.highlight.mode === 'outline'} onclick={() => (vs.highlight.mode = 'outline')}>контур</button>
@@ -663,45 +816,254 @@
       </div>
     {:else if vs.view === 'simplify'}
       <div class="row">
-        <span>Стиль</span>
+        <span>Стиль {@render i('simp.mode')}</span>
         <div class="seg">
           {#each [['clustering', 'кластеры'], ['graph', 'граф'], ['posterize', 'постер']] as [v, label]}
             <button class:active={vs.simplify.mode === v} onclick={() => (vs.simplify.mode = v as 'clustering')}>{label}</button>
           {/each}
         </div>
       </div>
-      <label class="row">Детали <b>{vs.simplify.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.simplify.details} /></label>
-      <label class="row">Лимит цветов <b>{vs.simplify.paletteLimit || 'нет'}</b><input type="range" min="0" max="16" bind:value={vs.simplify.paletteLimit} /></label>
-      <label class="row check"><input type="checkbox" bind:checked={vs.simplify.keepDark} /> Сохранять тонкие тёмные элементы</label>
+      <label class="row"><span>Детали {@render i('simp.details')}</span> <b>{vs.simplify.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.simplify.details} /></label>
+      <label class="row"><span>Лимит цветов {@render i('simp.limit')}</span> <b>{vs.simplify.paletteLimit || 'нет'}</b><input type="range" min="0" max="16" bind:value={vs.simplify.paletteLimit} /></label>
+      <label class="row check"><input type="checkbox" bind:checked={vs.simplify.keepDark} /> Сохранять тонкие тёмные элементы {@render i('simp.keepDark')}</label>
       {#if vs.simplify.keepDark}
-        <label class="row">Темнее пятна на ΔL* <b>{vs.simplify.darkDelta}</b><input type="range" min="5" max="40" bind:value={vs.simplify.darkDelta} /></label>
+        <label class="row"><span>Темнее пятна на ΔL* {@render i('simp.darkDelta')}</span> <b>{vs.simplify.darkDelta}</b><input type="range" min="5" max="40" bind:value={vs.simplify.darkDelta} /></label>
       {/if}
     {:else if vs.view === 'drawing'}
       <div class="row">
-        <span>Стиль</span>
+        <span>Стиль {@render i('draw.mode')}</span>
         <div class="seg">
           <button class:active={vs.drawing.mode === 'sketch'} onclick={() => (vs.drawing.mode = 'sketch')}>Sketch</button>
           <button class:active={vs.drawing.mode === 'contours'} onclick={() => (vs.drawing.mode = 'contours')}>Contours</button>
         </div>
       </div>
-      <label class="row">Line <b>{vs.drawing.line}</b><input type="range" min="0" max="100" bind:value={vs.drawing.line} /></label>
-      <label class="row">Stroke <b>{vs.drawing.stroke}</b><input type="range" min="1" max="5" bind:value={vs.drawing.stroke} /></label>
-      <label class="row check"><input type="checkbox" bind:checked={vs.drawing.invert} /> Инверсия</label>
+      <label class="row"><span>Line {@render i('draw.line')}</span> <b>{vs.drawing.line}</b><input type="range" min="0" max="100" bind:value={vs.drawing.line} /></label>
+      <label class="row"><span>Stroke {@render i('draw.stroke')}</span> <b>{vs.drawing.stroke}</b><input type="range" min="1" max="5" bind:value={vs.drawing.stroke} /></label>
+      <label class="row check"><input type="checkbox" bind:checked={vs.drawing.invert} /> Инверсия {@render i('draw.invert')}</label>
       <div class="row">
         <button class="primary" onclick={exportSvg} disabled={!opened}>SVG</button>
         <button onclick={exportInk} disabled={!opened}>PNG без фона</button>
-        <span class="muted">SVG для Illustrator, PNG без фона для Procreate (SVG он не открывает)</span>
+        {@render i('draw.export')}
       </div>
       {#if svgInfo}<p class="muted">SVG: {svgInfo.loops} контуров, {svgInfo.points} точек, {(svgInfo.bytes / 1024).toFixed(0)} КБ, {svgInfo.ms} мс</p>{/if}
+    {:else if vs.view === 'tattoo'}
+      {@const t = vs.tattoo}
+      <div class="seg wrap">
+        {#each TOOLS as [k, label]}<button class:active={t.tool === k} onclick={() => { vs.tattoo.tool = k; vs.tattoo.pigments.focus = -1; }}>{label}</button>{/each}
+        {@render i('tat.tool')}
+      </div>
+      {#if t.tool !== 'skin' && t.skin.use}
+        <div class="row"><span class="muted">Работаешь с версией для кожи: {toneName(t.skin.tone)} <span class="dot" style="background: rgb({skinRgb(t.skin).join(',')})"></span></span><button onclick={() => (vs.tattoo.skin.use = false)}>Исходный эскиз</button></div>
+      {/if}
+      {#if t.tool !== 'skin' && t.tool !== 'pigments' && t.tool !== 'design'}
+        <label class="row"><span>Ширина тату, см {@render i('tat.width')}</span> <b>{t.widthCm}</b><input type="range" min="2" max="40" step="0.5" bind:value={vs.tattoo.widthCm} /></label>
+      {/if}
+      <div class="row"><span class="muted">Настройки всех инструментов {@render i('tat.reset')}</span><button onclick={() => (vs.tattoo = { ...structuredClone(DEFAULT_TATTOO), tool: t.tool })}>Сбросить</button></div>
+      {#if t.tool === 'design'}
+        <p class="muted">Эскиз как есть, без упрощения. Выбери инструмент выше: каждый проверяет одно свойство эскиза.</p>
+      {:else if t.tool === 'contrast'}
+        <p class="muted">Эскиз упрощается до пятен; границы соседних цветов с близкой светлотой отмечены полосками: со временем они могут слиться.</p>
+        <label class="row"><span>Порог ΔL* {@render i('con.minDL')}</span> <b>{t.contrast.minDL}</b><input type="range" min="3" max="40" bind:value={vs.tattoo.contrast.minDL} /></label>
+        <label class="row"><span>Детали {@render i('con.details')}</span> <b>{t.contrast.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.contrast.details} /></label>
+        <label class="row"><span>Лимит цветов {@render i('con.levels')}</span> <b>{t.contrast.levels || 'нет'}</b><input type="range" min="0" max="5" bind:value={vs.tattoo.contrast.levels} /></label>
+        <label class="row"><span>«Один градиент» до ΔE {@render i('con.sameDE')}</span> <b>{t.contrast.sameDE}</b><input type="range" min="0" max="15" bind:value={vs.tattoo.contrast.sameDE} /></label>
+        <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.contrast.bw} /> Ч/б: показать светлоту вместо цвета {@render i('con.bw')}</label>
+      {:else if t.tool === 'pigments'}
+        {@const pg = t.pigments}
+        <div class="row">
+          <span>Режим {@render i('pig.mode')}</span>
+          <div class="seg">
+            <button class:active={pg.mode === 'color'} onclick={() => (vs.tattoo.pigments = { ...vs.tattoo.pigments, mode: 'color', focus: -1 })}>Цвет</button>
+            <button class:active={pg.mode === 'bg'} onclick={() => (vs.tattoo.pigments = { ...vs.tattoo.pigments, mode: 'bg', focus: -1 })}>Black & Grey</button>
+          </div>
+        </div>
+        <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.pigments.blend} /> {pg.mode === 'color' ? 'Смешивание: до 2 красок и разбавление' : 'Плавные переходы между тонами'} {@render i('pig.blend')}</label>
+        {#if pg.mode === 'color'}
+          <label class="row"><span>Бренд {@render i('pig.brand')}</span>
+            <select bind:value={vs.tattoo.pigments.brand}>
+              {#each INK_BRANDS as b}<option value={b}>{b}</option>{/each}
+              <option value="">все бренды</option>
+            </select>
+          </label>
+          <label class="row"><span>Красок {@render i('pig.max')}</span> <b>{pg.maxInks}</b><input type="range" min="1" max="16" bind:value={vs.tattoo.pigments.maxInks} /></label>
+          <label class="row"><span>Далеко, ΔE {@render i('pig.far')}</span> <b>{pg.farDE}</b><input type="range" min="3" max="25" bind:value={vs.tattoo.pigments.farDE} /></label>
+        {:else}
+          <label class="row"><span>Линейка {@render i('pig.series')}</span>
+            <select value={pg.series} onchange={(e) => setSeries(+(e.currentTarget as HTMLSelectElement).value)}>
+              <option value={-1}>свои тоны</option>
+              {#each GREY_SERIES as g, k}<option value={k}>{g.brand} · {g.series} ({g.names.length})</option>{/each}
+            </select>
+          </label>
+          {#if pg.series < 0}
+            <label class="row"><span>Тонов</span> <b>{pg.tonesL.length}</b><input type="range" min="2" max="6" value={pg.tonesL.length} oninput={(e) => (vs.tattoo.pigments.tonesL = evenTones(+(e.currentTarget as HTMLInputElement).value))} /></label>
+          {/if}
+          {#each pg.tonesL as L, k}
+            <label class="row"><span>{pg.series >= 0 ? GREY_SERIES[pg.series].names[k] : `Тон ${k + 1}`} {#if k === 0}{@render i('pig.tone')}{/if}</span> <b>{L}</b><input type="range" min="0" max="95" bind:value={vs.tattoo.pigments.tonesL[k]} /></label>
+          {/each}
+        {/if}
+        <div class="row">
+          <span>Основа {@render i('pig.source')}</span>
+          <div class="seg">
+            <button class:active={pg.source === 'photo'} onclick={() => (vs.tattoo.pigments.source = 'photo')}>фото</button>
+            <button class:active={pg.source === 'patches'} onclick={() => (vs.tattoo.pigments.source = 'patches')}>пятна Simplify</button>
+          </div>
+        </div>
+        {#if pg.source === 'patches'}
+          <label class="row"><span>Детали {@render i('simp.details')}</span> <b>{pg.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.pigments.details} /></label>
+        {/if}
+        <p class="muted">Тапни по краске в списке: останется видна только она, повторный тап покажет все. Тап или ведение пальцем по эскизу работает как пипетка: внизу появятся цвет точки, рецепт из красок эскиза и ближайшие краски бренда. ⇄ у краски — замены, если её нет в наличии {@render i('pig.alt')}</p>
+      {:else if t.tool === 'lines'}
+        <p class="muted">Проверка, удержатся ли линии и просветы при этом размере тату. Красное: линия тоньше минимума, может расплыться или пропасть. Синее: просвет уже минимума, может затянуться. Ширина в см задаёт масштаб: чем меньше тату, тем больше красного и синего.</p>
+        <div class="row">
+          <span>Линии {@render i('lin.source')}</span>
+          <div class="seg">
+            <button class:active={t.lines.source === 'design'} onclick={() => (vs.tattoo.lines.source = 'design')}>тёмное эскиза</button>
+            <button class:active={t.lines.source === 'drawing'} onclick={() => (vs.tattoo.lines.source = 'drawing')}>из Drawing</button>
+          </div>
+        </div>
+        {#if t.lines.source === 'design'}
+          <label class="row"><span>Линия темнее L* {@render i('lin.inkL')}</span> <b>{t.lines.inkL}</b><input type="range" min="5" max="80" bind:value={vs.tattoo.lines.inkL} /></label>
+          <p class="muted">Пиксели темнее этой светлоты считаются линией (серые на картинке). 0 = чёрный, 100 = белый.</p>
+        {:else}
+          <p class="muted">Берётся текущий Drawing: стиль, Line и Stroke настраиваются во вкладке Drawing.</p>
+        {/if}
+        <label class="row"><span>Мин. линия, мм {@render i('lin.minLine')}</span> <b>{t.lines.minLineMm}</b><input type="range" min="0.1" max="2" step="0.05" bind:value={vs.tattoo.lines.minLineMm} /></label>
+        <label class="row"><span>Мин. зазор, мм {@render i('lin.minGap')}</span> <b>{t.lines.minGapMm}</b><input type="range" min="0.2" max="3" step="0.1" bind:value={vs.tattoo.lines.minGapMm} /></label>
+        <p class="muted"><span class="dot" style="background: rgb(230,0,40)"></span> линия тоньше минимума · <span class="dot" style="background: rgb(0,110,255)"></span> зазор уже минимума</p>
+        <div class="row">
+          <label class="check"><input type="checkbox" bind:checked={vs.tattoo.lines.mirror} /> зеркально</label>
+          <button class="primary" onclick={exportStencil} disabled={!opened}>Трафарет PDF 1:1</button> {@render i('lin.pdf')}
+        </div>
+        {#if stencilInfo}<p class="muted">PDF: эскиз {stencilInfo.designMm[0]}×{stencilInfo.designMm[1]} мм на листе {stencilInfo.pageMm[0]}×{stencilInfo.pageMm[1]} мм, {(stencilInfo.bytes / 1024).toFixed(0)} КБ. Печатай в масштабе 100 % и проверь линейку 10 мм.</p>{/if}
+      {:else if t.tool === 'distance'}
+        <label class="row"><span>Расстояние, м {@render i('dist.m')}</span> <b>{t.distance.distanceM}</b><input type="range" min="0.5" max="10" step="0.5" bind:value={vs.tattoo.distance.distanceM} /></label>
+        <label class="row"><span>Острота зрения, ′ {@render i('dist.arcmin')}</span> <b>{t.distance.arcmin}</b><input type="range" min="0.5" max="3" step="0.5" bind:value={vs.tattoo.distance.arcmin} /></label>
+      {:else if t.tool === 'spread'}
+        <label class="row"><span>Растекание, мм {@render i('spr.mm')}</span> <b>{t.spread.spreadMm}</b><input type="range" min="0" max="0.6" step="0.05" bind:value={vs.tattoo.spread.spreadMm} /></label>
+        <label class="row"><span>Контраст {@render i('spr.contrast')}</span> <b>{Math.round(t.spread.contrast * 100)}%</b><input type="range" min="0.5" max="1" step="0.05" bind:value={vs.tattoo.spread.contrast} /></label>
+        <label class="row"><span>Размытие, мм {@render i('spr.blur')}</span> <b>{t.spread.blurMm}</b><input type="range" min="0" max="0.5" step="0.05" bind:value={vs.tattoo.spread.blurMm} /></label>
+        <p class="muted">Так может снизиться читаемость; реальный результат зависит от кожи и техники.</p>
+      {:else}
+        {@const sk = t.skin}
+        <div class="row">
+          <span>Тон кожи {@render i('skin.tone')}</span>
+          <div class="seg">
+            {#each SKIN_TONES as c, k}
+              <button class="tone" class:active={sk.tone === k} style="background: rgb({c.join(',')}); color: {k < 3 ? '#000' : '#fff'}" onclick={() => (vs.tattoo.skin.tone = k)}>{SKIN_NAMES[k]}</button>
+            {/each}
+            <label class="tone" class:active={sk.tone === OWN_TONE} style="background: {hex(sk.own)}">
+              <input type="color" value={hex(sk.own).toLowerCase()} oninput={(e) => { const v = parseInt((e.currentTarget as HTMLInputElement).value.slice(1), 16); vs.tattoo.skin = { ...vs.tattoo.skin, own: [v >> 16, (v >> 8) & 255, v & 255], tone: OWN_TONE }; }} />свой
+            </label>
+          </div>
+        </div>
+        <div class="row">
+          <span>Показать {@render i('skin.show')}</span>
+          <div class="seg">
+            {#each [['one', 'на коже'], ['compare', 'до / после'], ['all', 'все I–VI']] as [k, label]}
+              <button class:active={sk.show === k} onclick={() => (vs.tattoo.skin.show = k as typeof sk.show)}>{label}</button>
+            {/each}
+          </div>
+        </div>
+        {#if sk.show === 'all'}
+          <p class="muted">Каждый тон со своей калибровкой. Тапни по плитке, чтобы открыть и настроить этот тон.</p>
+        {:else}
+          <p class="muted">Калибровка для: {toneName(sk.tone)} {@render i('skin.cal')}</p>
+          {#each CAL as [k, label, min, max, unit]}
+            <label class="row"><span>{label} {@render i(`skin.${k}`)}</span> <b>{sk.cal[sk.tone][k]}{unit}</b><input type="range" {min} {max} bind:value={vs.tattoo.skin.cal[sk.tone][k]} /></label>
+          {/each}
+          <div class="row">
+            <button onclick={() => (vs.tattoo.skin.cal[sk.tone] = { ...NEUTRAL })}>Сбросить калибровку</button>
+            <button onclick={exportCalibrated} disabled={!opened}>PNG версии</button>
+            {@render i('skin.png')}
+          </div>
+          <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.skin.use} /> Работать с этой версией {@render i('skin.use')}</label>
+          {#if sk.use}
+            <div class="row"><button class="primary" onclick={() => (vs.tattoo.tool = 'pigments')}>Подобрать пигменты</button></div>
+          {/if}
+        {/if}
+        <p class="muted">Тоны I–VI ориентировочные (шкала Фицпатрика). Кожа просвечивает сквозь краску, поэтому белое на тёмной коже почти пропадает. Это прикидка, не прогноз заживления.</p>
+      {/if}
     {/if}
 
-    {#if vs.view !== 'original' && vs.view !== 'simplify' && vs.view !== 'drawing'}<canvas class="hist" bind:this={hcanvas}></canvas>{/if}
+    {#if vs.view !== 'original' && vs.view !== 'simplify' && vs.view !== 'drawing' && vs.view !== 'tattoo'}<canvas class="hist" bind:this={hcanvas}></canvas>{/if}
     {#if last?.stats.simplify}
       {@const s = last.stats.simplify}
       <p class="muted">Пятен {s.regions} · цветов {s.colors}{s.inkShare ? ` · тёмных элементов ${(s.inkShare * 100).toFixed(1)}%` : ''} · {s.ms.total} мс (сегментация {s.ms.segment}, слияние {s.ms.merge}, заливка {s.ms.paint}){last.timings.computeMs ? '' : ' · из кэша'}</p>
     {/if}
     {#if last?.stats.drawing}
       <p class="muted">Линий {(last.stats.drawing.inkShare * 100).toFixed(1)}% площади · расчёт {last.timings.computeMs} мс, загрузка в GPU {last.timings.uploadMs} мс, туда-обратно {last.roundTripMs} мс</p>
+    {/if}
+    {#if last?.stats.tattoo}
+      {@const ts = last.stats.tattoo}
+      {#if ts.contrast}
+        <p class="muted">Цветов {ts.contrast.colors} · слабых границ {ts.contrast.weakPairs} ({Math.round(ts.contrast.weakShare * 100)}% длины всех границ) · {ts.ms} мс{last.timings.computeMs ? '' : ' · из кэша'}</p>
+        <div class="pairs">
+          {#each ts.contrast.pairs as p}
+            <div class="row" class:weak={p.weak}>
+              <span class="dot" style="background: {p.a}"></span><span class="dot" style="background: {p.b}"></span>
+              <span>ΔL* {p.dL} · ΔE {p.dE} · граница {p.border}{p.colorOnColor ? ' · цвет на цвете' : ''}</span>
+            </div>
+          {/each}
+        </div>
+      {:else if ts.pigments && 'inks' in ts.pigments}
+        {@const pr = ts.pigments}
+        <p class="muted">Средняя разница с эскизом ΔE {pr.meanDE} · кожа без краски {Math.round(pr.skinShare * 100)}% · {ts.ms} мс{last.timings.computeMs ? '' : ' · из кэша'}</p>
+        <div class="pairs">
+          {#each pr.inks as k, j}
+            <div class="inkline">
+              <button class="inkrow" class:on={vs.tattoo.pigments.focus === j} onclick={() => focusPigment(j)}><span class="dot" style="background: {k.hex}"></span><span>{k.name} <span class="muted">· {k.line} · {Math.round(k.share * 100)}%{k.conf === 'm' ? '' : ' · цвет по фото флакона'}{vs.tattoo.pigments.include.includes(k.id) ? ' · выбрана тобой' : ''}</span></span></button>
+              <button class="alt" class:active={altFor === k.id} onclick={() => (altFor = altFor === k.id ? null : k.id)} aria-label="Замены">⇄</button>
+            </div>
+            {#if altFor === k.id}
+              {@const alt = alternatives(k.id)}
+              <div class="alts">
+                <div class="row"><button onclick={() => replaceInk(k.id, null)}>Нет в наличии</button><span class="muted">подбор возьмёт другую краску сам</span></div>
+                {#each [{ title: 'Этот же бренд', list: alt.same }, { title: 'Другие бренды', list: alt.other }] as { title, list }}
+                  <p class="muted">{title}:</p>
+                  {#each list as a}
+                    <button class="inkrow" onclick={() => replaceInk(k.id, a.id)}><span class="dot" style="background: {a.hex}"></span><span>{a.name} <span class="muted">· {a.brand} · {a.line} · ΔE {a.dE}{a.conf === 'm' ? '' : ' · по фото'}</span></span></button>
+                  {/each}
+                {/each}
+              </div>
+            {/if}
+          {/each}
+          {#if vs.tattoo.pigments.excluded.length || vs.tattoo.pigments.include.length}
+            <div class="chips">
+              {#each vs.tattoo.pigments.excluded as id}<button class="chip" onclick={() => (vs.tattoo.pigments.excluded = vs.tattoo.pigments.excluded.filter((x) => x !== id))}>нет: {inkById(id)?.name ?? id} ✕</button>{/each}
+              {#each vs.tattoo.pigments.include as id}<button class="chip" onclick={() => (vs.tattoo.pigments.include = vs.tattoo.pigments.include.filter((x) => x !== id))}>своя: {inkById(id)?.name ?? id} ✕</button>{/each}
+            </div>
+          {/if}
+          <button class="inkrow" class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)}><span class="dot" style="background: {vs.tattoo.skin.use ? `rgb(${skinRgb(vs.tattoo.skin).join(',')})` : '#F5F3EF'}"></span><span>Кожа без краски <span class="muted">· {Math.round(pr.skinShare * 100)}%</span></span></button>
+        </div>
+        {#if pr.misses.length}
+          <p class="muted">Не попадают ни в одну краску ближе ΔE {vs.tattoo.pigments.farDE}:</p>
+          <div class="pairs">
+            {#each pr.misses as m}
+              <div class="row weak"><span class="dot" style="background: {m.hex}"></span><span class="dot" style="background: {m.nearestHex}"></span><span>{Math.round(m.share * 100)}% эскиза · ближе всего {m.nearest}, ΔE {m.nearestDE}{m.usedDE > m.nearestDE + 0.5 ? ` (сейчас ΔE ${m.usedDE}: добавь краску)` : ''}</span></div>
+            {/each}
+          </div>
+        {/if}
+      {:else if ts.pigments && 'tones' in ts.pigments}
+        {@const pr = ts.pigments}
+        <div class="levels">
+          {#each pr.tones as L, k}<button class:on={vs.tattoo.pigments.focus === k} onclick={() => focusPigment(k)} style="background: rgb({labToSrgb(L, 0, 0).join(',')}); color: {L > 55 ? '#000' : '#fff'}">{Math.round(pr.shares[k] * 100)}%</button>{/each}
+          <button class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)} style="background: #fff; color: #000">кожа {Math.round(pr.skinShare * 100)}%</button>
+        </div>
+        <p class="muted">Тапни по тону, чтобы увидеть, где он. Пипетка по эскизу покажет светлоту точки и ближайший тон.</p>
+        <p class="muted">Кожа без краски {Math.round(pr.skinShare * 100)}% · {ts.ms} мс</p>
+      {:else if ts.lines}
+        <p class="muted">{ts.lines.pxPerMm} px/мм · линий {(ts.lines.inkShare * 100).toFixed(1)}% · тонких {(ts.lines.thinShare * 100).toFixed(1)}% линий · узких зазоров {(ts.lines.gapShare * 100).toFixed(1)}% площади · {ts.ms} мс</p>
+        {#if ts.lines.inkShare < 0.005}<p class="error">Линией почти ничего не считается ({(ts.lines.inkShare * 100).toFixed(1)}%). Подними «Линия темнее L*» или нажми «Сбросить».</p>{/if}
+        {#if ts.lines.lowResolution}<p class="error">Разрешения мало: минимальная линия меньше 2 px. Уменьши ширину тату или открой фото крупнее.</p>{/if}
+      {:else if ts.distance}
+        {@const f = ts.distance.figure}
+        <p class="muted">Размытие {ts.distance.blurPx} px · Notan совпадает на {Math.round(ts.distance.iou * 100)}% (IoU) · {ts.ms} мс</p>
+        <p class="muted">Фигура/фон: тёмного {Math.round(f.darkShare * 100)}%, крупных тёмных пятен {f.bigDark}, главное пятно {Math.round(f.dominant * 100)}% тёмного</p>
+      {:else if ts.spread}
+        <p class="muted">Растекание {ts.spread.spreadPx} px · размытие {ts.spread.blurPx} px · {ts.ms} мс</p>
+      {:else}
+        <p class="muted">{ts.ms} мс</p>
+      {/if}
     {/if}
     {#if last?.stats.values}
       <div class="levels">
@@ -719,17 +1081,62 @@
     {#if last?.stats.temperature}
       <p class="muted">Тёплого {Math.round(last.stats.temperature.warmShare * 100)}% · нейтраль {last.stats.temperature.neutral.toFixed(1)} · разброс {last.stats.temperature.spread}</p>
     {/if}
+    <details class="common">
+      <summary>Общие настройки</summary>
+      <div class="row">
+        <span>Сглаживание {@render i('smoothing')}</span>
+        <div class="seg">
+          {#each [[0, 'нет'], [1, 'слабое'], [2, 'сильное']] as [v, label]}
+            <button class:active={vs.smoothing === v} onclick={() => (vs.smoothing = v as 0 | 1 | 2)}>{label}</button>
+          {/each}
+        </div>
+      </div>
+      {#if tool === 'pipette'}
+        <div class="row">
+          <span>Размер пробы {@render i('sampleSize')}</span>
+          <div class="seg">
+            {#each SIZES as n}<button class:active={sampleSize === n} onclick={() => (sampleSize = n)}>{n === 1 ? '1 px' : `${n}×${n}`}</button>{/each}
+          </div>
+        </div>
+      {/if}
+    </details>
   </section>
 
+  {#if section === 'palette'}
   <section class="card controls">
     <h2>Палитра</h2>
-    <label class="row">Dominant <b>{pparams.dominant}</b><input type="range" min="3" max="12" bind:value={pparams.dominant} /></label>
-    <label class="row">Range <b>{pparams.range}</b><input type="range" min="3" max="12" bind:value={pparams.range} /></label>
-    <label class="row">Accents <b>{pparams.accents}</b><input type="range" min="0" max="12" bind:value={pparams.accents} /></label>
-    <label class="row">Слияние ΔE <b>{pparams.mergeDE}</b><input type="range" min="0" max="20" bind:value={pparams.mergeDE} /></label>
+    <label class="row"><span>Краски {@render i('artPaints')}</span>
+      <select value={artSet.type} onchange={(e) => chooseArtType((e.currentTarget as HTMLSelectElement).value)}>
+        <option value="">не подбирать</option>
+        {#each [['acrylic', 'Акрил'], ['oil', 'Масло'], ['water-mixable-oil', 'Водорастворимое масло'], ['watercolor', 'Акварель'], ['gouache', 'Гуашь'], ['acrylic-gouache', 'Акриловая гуашь'], ['soft-pastel', 'Сухая пастель'], ['alcohol-marker', 'Спиртовые маркеры'], ['colored-pencil', 'Цветные карандаши']] as [v, label]}<option value={v}>{label}</option>{/each}
+      </select>
+    </label>
+    {#if artErr}<p class="error">{artErr}</p>{/if}
+    {#if artSet.type && !artCat && !artErr}<p class="muted">Загружаю каталог красок…</p>{/if}
+    {#if artOn}
+      <label class="row"><span>Бренд</span>
+        <select bind:value={artSet.brand}>
+          <option value="">все бренды</option>
+          {#each artBrands as b}<option value={b}>{b}</option>{/each}
+        </select>
+      </label>
+      {#if ['oil', 'acrylic', 'watercolor', 'water-mixable-oil'].includes(artSet.type)}
+        <div class="row">
+          <span>Сравнивать {@render i('artTint')}</span>
+          <div class="seg">
+            <button class:active={!artSet.tint} onclick={() => (artSet.tint = false)}>{artSet.type === 'watercolor' ? 'плотная заливка' : 'масстон'}</button>
+            <button class:active={artSet.tint} onclick={() => (artSet.tint = true)}>{artSet.type === 'watercolor' ? 'лессировка' : 'разбел'}</button>
+          </div>
+        </div>
+      {/if}
+    {/if}
+    <label class="row"><span>Dominant {@render i('pal.dominant')}</span> <b>{pparams.dominant}</b><input type="range" min="3" max="12" bind:value={pparams.dominant} /></label>
+    <label class="row"><span>Range {@render i('pal.range')}</span> <b>{pparams.range}</b><input type="range" min="3" max="12" bind:value={pparams.range} /></label>
+    <label class="row"><span>Accents {@render i('pal.accents')}</span> <b>{pparams.accents}</b><input type="range" min="0" max="12" bind:value={pparams.accents} /></label>
+    <label class="row"><span>Слияние ΔE {@render i('pal.merge')}</span> <b>{pparams.mergeDE}</b><input type="range" min="0" max="20" bind:value={pparams.mergeDE} /></label>
     <div class="row">
       <button class="primary" onclick={runPalette} disabled={!opened || !!busy}>Извлечь палитру</button>
-      <label class="check"><input type="checkbox" bind:checked={showMarkers} /> маркеры на фото</label>
+      <label class="check"><input type="checkbox" bind:checked={showMarkers} /> маркеры на фото {@render i('pal.markers')}</label>
     </div>
     {#if palette}
       <div class="seg">
@@ -742,12 +1149,20 @@
           </button>
         {/each}
       </div>
+      {#if artOn && swatches.length}
+        <p class="muted">Ближайшая краска к каждому образцу. ⇄ покажет замены, если такой краски нет.</p>
+        {#each swatches as s, i}
+          {@const m = nearestPaints(artCat!, artSet, s.lab, 1)[0]}
+          {#if m}{@render paintRow(m.paint, m.dE, `${i + 1}`, s.hex)}{/if}
+        {/each}
+      {/if}
       {#if !swatches.length}<p class="muted">Акцентов нет: насыщенных цветов вдали от основных не нашлось.</p>{/if}
       <p class="muted">Всего {palette.totalMs} мс: чтение пикселей {palette.readMs}, сетка {palette.gridMs}, извлечение {palette.ms}. Тап по образцу открывает карточку цвета.</p>
     {/if}
   </section>
+  {/if}
 
-  {#if current}
+  {#if current && tool === 'pipette'}
     {@const c = current.info}
     <section class="card">
       <h2>Цвет</h2>
@@ -772,6 +1187,38 @@
         <button onclick={() => (compareA = c)}>Запомнить как A</button>
         <button class="primary" onclick={() => findOnPhoto(c)}>Найти на фото</button>
       </div>
+      {#if inkPipette}
+        {@const pg = vs.tattoo.pigments}
+        {@const tp = last?.stats.tattoo?.pigments}
+        {@const set = tp && 'inks' in tp ? tp.inks : []}
+        {#if pg.mode === 'bg'}
+          {@const k = pg.tonesL.reduce((b, L, j) => (Math.abs(L - c.lab[0]) < Math.abs(pg.tonesL[b] - c.lab[0]) ? j : b), 0)}
+          <p class="muted">Светлота L* {Math.round(c.lab[0])}: ближе всего {pg.series >= 0 ? GREY_SERIES[pg.series].names[k] : `тон ${k + 1}`} (L* {pg.tonesL[k]}).</p>
+        {:else}
+          {@const rec = inkRecipe(c.rgb, set.map((k) => k.id))}
+          {#if rec}
+            <p class="muted">Из красок на эскизе (ΔE {rec.dE}):</p>
+            <div class="row"><span class="dot" style="background: {rec.hex}"></span><span>{rec.inks.length ? rec.inks.map((k) => `${k.name} ${k.pct}%`).join(' + ') : 'кожа без краски'}</span></div>
+            {#each rec.inks as k}
+              {@const j = set.findIndex((s) => s.id === k.id)}
+              {#if j >= 0}<button class="inkrow" class:on={pg.focus === j} onclick={() => focusPigment(j)}><span class="dot" style="background: {k.hex}"></span><span>Показать {k.name} на эскизе</span></button>{/if}
+            {/each}
+          {/if}
+          <p class="muted">Ближайшие краски {pg.brand || 'всех брендов'}:</p>
+          {#each nearestInks(c.lab, pg.brand, 5, pg.excluded) as a}
+            {@const inSet = set.some((k) => k.id === a.id)}
+            <div class="inkline">
+              <span class="inkrow"><span class="dot" style="background: {a.hex}"></span><span>{a.name} <span class="muted">· {a.line} · ΔE {a.dE}{a.conf === 'm' ? '' : ' · по фото'}{inSet ? ' · уже на эскизе' : ''}</span></span></span>
+              {#if !inSet}<button class="alt" onclick={() => (vs.tattoo.pigments = { ...pg, focus: -1, include: [...new Set([...pg.include, a.id])] })} aria-label="Добавить в набор">+</button>{/if}
+            </div>
+          {/each}
+        {/if}
+      {:else if artOn}
+        <p class="muted">Ближайшие краски набора:</p>
+        {#each nearestPaints(artCat!, artSet, c.lab, 3) as m}{@render paintRow(m.paint, m.dE)}{/each}
+      {:else}
+        <p class="muted">Выбери краски во вкладке «Палитра», и здесь появятся ближайшие из набора.</p>
+      {/if}
       {#if compareA}
         {@const d = compareColors(compareA.rgb, c.rgb)}
         <div class="row">
@@ -782,7 +1229,24 @@
     </section>
   {/if}
 
-  <section class="card">
+  <details class="card diag">
+    <summary>Диагностика: цели этапов, сверка GPU и CPU</summary>
+  <section>
+    <h2>Этап 4: тату-инструменты</h2>
+    {#if opened}
+      <ul class="targets">
+        {#each TOOLS.filter(([k]) => k !== 'design') as [k, label]}
+          <li class={ok(!!tattooLog[k])}>{label}: {tattooLog[k] ? `${tattooLog[k].ms} мс на ${tattooLog[k].work}` : 'открой во вкладке Тату'}</li>
+        {/each}
+        <li class={ok(!!stencilInfo)}>Трафарет PDF: {stencilInfo ? `${stencilInfo.designMm[0]}×${stencilInfo.designMm[1]} мм; распечатай в 100 % и сверь линейку` : 'Тату → Линии → «Трафарет PDF 1:1»'}</li>
+      </ul>
+      <p class="muted">Приёмка этапа: на 10 эскизах студии предупреждения совпадают с оценкой мастера минимум в 8 случаях. Пороги стартовые и настраиваются.</p>
+    {:else}
+      <p class="muted">Открой эскиз.</p>
+    {/if}
+  </section>
+
+  <section>
     <h2>Цели этапа 3</h2>
     {#if opened}
       <ul class="targets">
@@ -807,7 +1271,7 @@
     {/if}
   </section>
 
-  <section class="card">
+  <section>
     <h2>Цели этапа 2</h2>
     {#if opened}
       <ul class="targets">
@@ -827,7 +1291,7 @@
     {/if}
   </section>
 
-  <section class="card">
+  <section>
     <h2>Цели этапа 1</h2>
     {#if opened}
       <ul class="targets">
@@ -855,7 +1319,7 @@
     {/if}
   </section>
 
-  <section class="card">
+  <section>
     <h2>Сверка GPU и CPU</h2>
     <p class="muted">Рендерит 20 режимов на 4 эталонных фото на GPU и на CPU и сравнивает пиксели (Simplify и Drawing: результат CPU против показа на GPU). Плюс режим «как в оригинале» против порогов Color Study.</p>
     <button class="primary" onclick={runSelftest} disabled={!engine || !!busy}>Запустить сверку</button>
@@ -875,13 +1339,46 @@
     {/if}
   </section>
 
+  </details>
+
   <section class="card actions">
     <button class="primary" onclick={shareReport}>Поделиться отчётом</button>
     <button onclick={copyReport}>{copied || 'Копировать JSON'}</button>
     <button onclick={exportPng} disabled={!opened}>PNG рабочей копии</button>
   </section>
   {#if engine}<p class="sub">GPU: {engine.caps.renderer} · MAX_TEXTURE_SIZE {engine.caps.maxTextureSize} · вывод: {engine.caps.present === 'canvas' ? 'canvas в Worker' : 'ImageBitmap'}</p>{/if}
+  {#if hint && HINTS[hint]}
+    <div class="sheet" role="dialog" aria-label={HINTS[hint][0]}>
+      <b>{HINTS[hint][0]}</b>
+      <p>{HINTS[hint][1]}</p>
+      <button onclick={() => (hint = null)}>Понятно</button>
+    </div>
+  {/if}
 </main>
+
+{#snippet paintRow(p: ArtPaint, dE: number, tag = '', from = '')}
+  <div class="inkline">
+    <div class="inkrow">
+      {#if from}<span class="dot" style="background: {from}"></span><span class="muted">{tag}</span>{/if}
+      <span class="dot" style="background: {artSet.tint && p.tint ? p.tint.hex : p.hex}"></span>
+      <span>{p.name}{p.code ? ` (${p.code})` : ''} <span class="muted">· {p.brand} · {p.line} · ΔE {dE}{p.pigmentKey ? ` · ${p.pigmentKey.replaceAll('+', ', ')}` : ''}</span></span>
+    </div>
+    <button class="alt" class:active={artAlt === p.id} onclick={() => (artAlt = artAlt === p.id ? null : p.id)} aria-label="Замены">⇄</button>
+  </div>
+  {#if artAlt === p.id && artCat}
+    <div class="alts">
+      {#each paintAlternatives(artCat, p, artSet.tint) as a}
+        <div class="inkrow"><span class="dot" style="background: {artSet.tint && a.paint.tint ? a.paint.tint.hex : a.paint.hex}"></span><span>{a.paint.name} <span class="muted">· {a.paint.brand} · {a.paint.line} · {a.why} · ΔE {a.dE}</span></span></div>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet i(key: string)}
+  <span class="i" role="button" tabindex="0" aria-label="Что это"
+    onclick={(e) => { e.preventDefault(); e.stopPropagation(); hint = hint === key ? null : key; }}
+    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); hint = hint === key ? null : key; } }}>i</span>
+{/snippet}
 
 <style>
   :global(:root) {
@@ -931,9 +1428,18 @@
     padding: 12px;
     margin: 12px 0;
   }
+  /* The photo and the section tabs stay on screen; the controls scroll under them. */
+  .pinned {
+    position: sticky; top: 0; z-index: 5;
+    margin: 0 -16px; padding: calc(4px + env(safe-area-inset-top)) 16px 6px;
+    background: var(--bg); border-bottom: 1px solid var(--line);
+  }
+  .chain { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+  .chain .muted { flex: 1 1 100%; margin: 0; }
+  .chain button { font-size: 13px; padding: 4px 10px; }
   .stage {
     position: relative;
-    height: min(62vh, 560px);
+    height: min(44vh, 460px);
     background: var(--stage);
     border-radius: 12px;
     overflow: hidden;
@@ -957,7 +1463,9 @@
   button:disabled { opacity: 0.5; }
   .chip { font-size: 13px; padding: 4px 9px; }
   .primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 4px; margin-top: 10px; }
+  .tabs { display: flex; gap: 4px; margin-top: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs button { flex: none; padding: 6px 12px !important; }
   .progress { position: absolute; left: 12px; right: 12px; bottom: 12px; height: 6px; border-radius: 3px; background: rgba(0, 0, 0, 0.25); overflow: hidden; }
   .progress span { display: block; height: 100%; background: var(--accent); transition: width 0.1s; }
   .tabs button { font-size: 13px; }
@@ -974,6 +1482,9 @@
   .swatches small { font-weight: 400; font-size: 10px; }
   .colorhead { display: flex; gap: 12px; align-items: flex-start; }
   .big { width: 64px; height: 64px; border-radius: 10px; border: 1px solid var(--line); flex: none; }
+  .tone { min-width: 40px; padding: 6px 8px; border: 2px solid transparent; border-radius: 8px; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+  .tone.active { border-color: var(--fg); }
+  .tone input[type='color'] { width: 22px; height: 22px; padding: 0; border: none; background: none; }
   .dot { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line); display: inline-block; flex: none; }
   .codes { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px; margin: 8px 0; }
   .codes button { text-align: left; font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
@@ -981,12 +1492,35 @@
   .tabs button, .seg button { padding: 6px 4px; }
   .active { background: var(--fg); color: var(--bg); border-color: var(--fg); }
   .controls .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; flex-wrap: wrap; }
-  .controls .row > span:first-child { min-width: 92px; color: var(--muted); font-size: 14px; }
+  .controls .row > span:first-child:not(.dot) { min-width: 92px; color: var(--muted); font-size: 14px; }
   .controls label.row { color: var(--muted); font-size: 14px; }
   .controls label.row b { color: var(--fg); min-width: 26px; }
   .controls input[type='range'] { flex: 1; min-width: 160px; }
+  .inkline { display: flex; gap: 6px; align-items: stretch; }
+  .inkline .inkrow { flex: 1; }
+  .alt { margin: 4px 0; padding: 0 12px; font-size: 16px; }
+  .alts { margin: 0 0 8px 16px; padding-left: 8px; border-left: 2px solid var(--line); }
+  .inkrow { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; margin: 4px 0; padding: 6px 8px; font-size: 13px; }
+  .inkrow.on, .levels button.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .levels button { flex: 1; border: 1px solid var(--line); border-radius: 4px; padding: 4px 0; font-size: 12px; }
   .check { gap: 6px !important; color: var(--fg) !important; }
+  .i {
+    display: inline-grid; place-items: center; width: 18px; height: 18px; margin-left: 4px; vertical-align: 1px;
+    border: 1px solid var(--muted); border-radius: 50%; color: var(--muted); font: italic 600 11px/1 Georgia, serif; cursor: pointer;
+  }
+  .sheet {
+    position: fixed; left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom)); z-index: 10;
+    max-width: 640px; margin: 0 auto; padding: 14px; border-radius: 14px;
+    background: var(--card); border: 1px solid var(--line); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+  }
+  .sheet p { margin: 6px 0 10px; }
+  details.common { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+  .diag > section { border-top: 1px solid var(--line); padding: 10px 0 2px; margin-top: 10px; }
+  select { font: inherit; font-size: 14px; flex: 1; min-width: 160px; padding: 5px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); }
   .seg { display: flex; gap: 4px; flex-wrap: wrap; }
+  .pairs .row { font-size: 13px; }
+  .pairs .weak { color: var(--accent); }
   .hist { width: 100%; height: 64px; display: block; margin-top: 8px; }
   .levels { display: flex; gap: 2px; margin-top: 6px; }
   .levels span { flex: 1; text-align: center; font-size: 11px; padding: 3px 0; border-radius: 4px; border: 1px solid var(--line); }

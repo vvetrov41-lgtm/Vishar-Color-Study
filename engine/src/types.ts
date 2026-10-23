@@ -85,6 +85,13 @@ export interface SvgExport {
   ms: number;
 }
 
+export interface StencilExport {
+  pdf: Uint8Array;
+  pageMm: [number, number];
+  designMm: [number, number];
+  ms: number;
+}
+
 export interface PickResult {
   /** Pixel of the working copy at the centre of the sample. */
   x: number;
