@@ -12,6 +12,7 @@
   import { nearestPaints, paintAlternatives, parseArtCatalogue, type ArtCatalogue, type ArtPaint, type ArtSet } from '../src/core/artpaints';
   import { alternatives, evenTones, GREY_SERIES, INK_BRANDS, inkById, inkRecipe, nearestInks } from '../src/core/pigments';
   import { HINTS } from './hints';
+  import { askPersist, deleteProject, exportProjectFile, getBlob, importProjectFile, listProjects, renameProject, saveProject, saveView, storageInfo, type ProjectMeta, type StorageInfo } from './projects';
   import type { OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
 
   const VERSION = __ENGINE_VERSION__;
@@ -94,6 +95,7 @@
       chain = [...chain, { label: name, blob }];
       palette = null; current = null; picked = null;
       openSection('original');
+      void saveChain();
     } catch (e) {
       error = String((e as Error)?.message ?? e);
       busy = '';
@@ -107,6 +109,152 @@
     await openBlob(top.blob, top.label, true);
     chain = next;
     palette = null; current = null; picked = null;
+    void saveChain();
+  }
+
+  // Service Worker version, to see that the offline copy matches this build.
+  let swInfo = $state<{ version: string; precached: number } | null>(null);
+  if (typeof navigator !== 'undefined' && navigator.serviceWorker) {
+    navigator.serviceWorker.addEventListener('message', (e) => { if (e.data?.version) swInfo = e.data; });
+    void navigator.serviceWorker.ready.then((r) => r.active?.postMessage('version'));
+  }
+
+  // Projects (stage 5): the chain and view settings saved on the device, autosaved while open.
+  let project = $state<{ id: string; name: string } | null>(null);
+  let projects = $state<ProjectMeta[]>([]);
+  let storage = $state<StorageInfo | null>(null);
+  let projectMsg = $state('');
+  let loadingProject = false;
+
+  const thumbs = new WeakMap<Blob, string>();
+  const thumbUrl = (b: Blob) => { let u = thumbs.get(b); if (!u) thumbs.set(b, (u = URL.createObjectURL(b))); return u; };
+  const stepsWord = (n: number) => (n % 10 === 1 && n % 100 !== 11 ? 'шаг' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'шага' : 'шагов');
+
+  async function refreshProjects() {
+    try {
+      projects = await listProjects();
+      storage = await storageInfo();
+    } catch (e) {
+      projectMsg = `Хранилище недоступно: ${(e as Error).message}`;
+    }
+  }
+
+  async function saveChain() {
+    if (!project || !chain.length) return;
+    const m = await saveProject({ id: project.id, name: project.name, chain: $state.snapshot(chain) as typeof chain, view: $state.snapshot(vs) });
+    project = { id: m.id, name: m.name };
+    await refreshProjects();
+  }
+
+  async function newProject() {
+    if (!opened || !chain.length) return;
+    busy = 'Сохраняю проект…';
+    try {
+      // Asked once, on the first save: without it Safari may clear the data after 7 days unused.
+      if (storage && !storage.persisted) await askPersist();
+      const name = opened.label.split('/').pop()!.replace(/\.[a-z0-9]+$/i, '') || 'Проект';
+      const m = await saveProject({ name, chain: $state.snapshot(chain) as typeof chain, view: $state.snapshot(vs) });
+      project = { id: m.id, name: m.name };
+      projectMsg = `Сохранён «${m.name}». Дальше изменения сохраняются сами.`;
+      await refreshProjects();
+    } catch (e) {
+      projectMsg = `Не сохранилось: ${(e as Error).message}`;
+    } finally {
+      busy = '';
+    }
+  }
+
+  async function openProject(p: ProjectMeta) {
+    busy = `Открываю проект ${p.name}…`;
+    try {
+      const steps = await Promise.all(p.steps.map(async (s) => ({ label: s.label, blob: await getBlob(s.key) })));
+      if (!steps.length) throw new Error('в проекте нет фото');
+      loadingProject = true;
+      const top = steps[steps.length - 1];
+      await openBlob(top.blob, top.label);
+      Object.assign(vs, JSON.parse(JSON.stringify(p.view)) as ViewState);
+      section = (TABS.some(([k]) => k === vs.view) ? vs.view : 'original') as Section;
+      chain = steps;
+      project = { id: p.id, name: p.name };
+      await apply();
+      projectMsg = '';
+    } catch (e) {
+      projectMsg = `Не открылся: ${(e as Error).message}`;
+    } finally {
+      loadingProject = false;
+      busy = '';
+    }
+  }
+
+  async function removeProject(p: ProjectMeta) {
+    if (!confirm(`Удалить проект «${p.name}» с устройства?`)) return;
+    await deleteProject(p.id);
+    if (project?.id === p.id) project = null;
+    await refreshProjects();
+  }
+
+  async function renameCurrent(name: string) {
+    if (!project || !name.trim()) return;
+    await renameProject(project.id, name.trim());
+    project = { ...project, name: name.trim() };
+    await refreshProjects();
+  }
+
+  async function shareProject(p: ProjectMeta) {
+    const f = await exportProjectFile(p.id);
+    await shareFile(f.blob, f.name);
+  }
+
+  async function onProjectFile(e: Event) {
+    const f = (e.target as HTMLInputElement).files?.[0];
+    if (!f) return;
+    try {
+      const m = await importProjectFile(f);
+      await refreshProjects();
+      await openProject(m);
+    } catch (err) {
+      projectMsg = `Не импортировался: ${(err as Error).message}`;
+    }
+  }
+
+  // View settings autosave, a moment after the last change.
+  let viewTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const v = $state.snapshot(vs), id = project?.id;
+    if (!id) return;
+    clearTimeout(viewTimer);
+    viewTimer = setTimeout(() => void saveView(id, v), 800);
+  });
+
+  // Network audit (stage 5 target): photos are opened from local files and never sent anywhere.
+  let net = $state<{ total: number; external: string[]; bodies: number; images: string[] } | null>(null);
+  let sentBodies = 0;
+  if (typeof window !== 'undefined') {
+    const f0 = window.fetch.bind(window);
+    window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+      const m = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      if (m !== 'GET' && m !== 'HEAD') sentBodies++;
+      return f0(input, init);
+    };
+  }
+  function auditNetwork() {
+    const all = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
+    const ext = all.filter((r) => new URL(r.name).origin !== location.origin).map((r) => r.name);
+    // Images fetched at all: only the built-in test photos may be here (opened from the chips).
+    const imgs = all.map((r) => new URL(r.name)).filter((u) => /\.(jpe?g|png|heic|heif|webp|dng)$/i.test(u.pathname) && !/(fixtures|samples)\//.test(u.pathname) && !/icon|touch/.test(u.pathname)).map((u) => u.pathname);
+    net = { total: all.length, external: ext, bodies: sentBodies, images: imgs };
+  }
+
+  function exportCsv() {
+    if (!palette) return;
+    const rows = [['group', 'n', 'hex', 'r', 'g', 'b', 'L', 'a', 'b*', 'share', 'marker_x', 'marker_y', ...(artOn ? ['paint', 'paint_brand', 'paint_dE'] : [])]];
+    for (const [k] of KINDS) palette[k].forEach((sw, j) => {
+      const m = artOn ? nearestPaints(artCat!, artSet, sw.lab, 1)[0] : null;
+      rows.push([k, String(j + 1), sw.hex, ...sw.rgb.map(String), ...sw.lab.map((v) => v.toFixed(1)), sw.share.toFixed(4), sw.marker.x.toFixed(4), sw.marker.y.toFixed(4),
+        ...(artOn ? [m?.paint.name ?? '', m?.paint.brand ?? '', m ? String(m.dE) : ''] : [])]);
+    });
+    const csv = rows.map((r) => r.map((c) => (/[",;\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(',')).join('\n');
+    void shareFile(new Blob(['\uFEFF' + csv], { type: 'text/csv' }), `vishar-palette.csv`);
   }
 
   // Art paints: the catalogue loads on demand when a paint type is chosen in the palette.
@@ -190,6 +338,7 @@
   }
 
   onMount(() => {
+    void refreshProjects();
     jank();
     EngineClient.create(canvas).then((c) => {
       engine = c;
@@ -211,6 +360,17 @@
           stencil: async () => { const r = await engine!.exportStencil(); return { pageMm: r.pageMm, designMm: r.designMm, ms: r.ms, bytes: r.pdf.length, head: new TextDecoder().decode(r.pdf.subarray(0, 8)) }; },
           svg: async () => { const s = await engine!.exportSvg(); return { loops: s.loops, points: s.points, ms: s.ms, bytes: s.svg.length, head: s.svg.slice(0, 200) }; },
           report,
+          projects: {
+            save: async () => { await newProject(); return { project: $state.snapshot(project), msg: projectMsg }; },
+            list: async () => { await refreshProjects(); return { list: $state.snapshot(projects).map((p) => ({ id: p.id, name: p.name, steps: p.steps.length, bytes: p.bytes })), storage: $state.snapshot(storage) }; },
+            open: async (k: number) => { await openProject(projects[k]); return { project: $state.snapshot(project), chain: chain.map((c) => c.label), view: vs.view, msg: projectMsg, opened: !!opened }; },
+            commit: async () => { await commit(); return chain.map((c) => c.label); },
+            fileBytes: async (k: number) => { const f = await exportProjectFile(projects[k].id); return Array.from(new Uint8Array(await f.blob.arrayBuffer())); },
+            importBytes: async (b: number[]) => { const m = await importProjectFile(new Blob([new Uint8Array(b)])); await refreshProjects(); return m.name; },
+            remove: async (k: number) => { await deleteProject(projects[k].id); await refreshProjects(); return projects.length; },
+          },
+          sw: () => $state.snapshot(swInfo),
+          net: () => { auditNetwork(); return $state.snapshot(net); },
         },
       });
     }).catch((e) => (error = String(e?.message ?? e)));
@@ -223,6 +383,7 @@
     busy = `Открываю ${label}…`;
     lastBlob = { blob, label };
     if (!keep) vs.tattoo.tool = 'design';
+    if (!keep && !loadingProject) project = null;
     stall.max = 0;
     const t0 = performance.now();
     try {
@@ -676,6 +837,29 @@
       {/each}
     </div>
   </section>
+
+  <details class="card">
+    <summary>Проекты{project ? `: ${project.name}` : ''} {@render i('projects')}</summary>
+    {#if project}
+      <label class="row"><span>Название</span><input type="text" value={project.name} onchange={(e) => renameCurrent((e.currentTarget as HTMLInputElement).value)} /></label>
+      <p class="muted">Сохраняется само: шаги «Взять в работу» и настройки разделов.</p>
+    {:else}
+      <div class="row"><button class="primary" onclick={newProject} disabled={!opened || !!busy}>Сохранить как проект</button></div>
+    {/if}
+    {#if projectMsg}<p class="muted">{projectMsg}</p>{/if}
+    {#each projects as p (p.id)}
+      <div class="project" class:on={project?.id === p.id}>
+        {#if p.thumb}<img src={thumbUrl(p.thumb)} alt="" />{:else}<span class="nothumb"></span>{/if}
+        <button class="inkrow" onclick={() => openProject(p)} disabled={!!busy}><span>{p.name} <span class="muted">· {p.steps.length} {stepsWord(p.steps.length)} · {(p.bytes / 1048576).toFixed(1)} МБ · {new Date(p.updated).toLocaleString('ru', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span></span></button>
+        <button class="alt" onclick={() => shareProject(p)} aria-label="Файл проекта">⤓</button>
+        <button class="alt" onclick={() => removeProject(p)} aria-label="Удалить">✕</button>
+      </div>
+    {/each}
+    <label class="file">Открыть файл проекта .vishar <input type="file" accept=".vishar,application/octet-stream" onchange={onProjectFile} /></label>
+    {#if storage}
+      <p class="muted">Хранилище: {storage.kind === 'opfs' ? 'OPFS' : 'IndexedDB'} · занято {storage.usage != null ? (storage.usage / 1048576).toFixed(1) : '?'} МБ из {storage.quota != null ? Math.round(storage.quota / 1048576) : '?'} · {storage.persisted ? 'защищено от очистки' : 'браузер может очистить, если долго не открывать'}</p>
+    {/if}
+  </details>
 
   <div class="pinned">
   <div class="stage" bind:this={box} bind:clientWidth={stageW} bind:clientHeight={stageH}>
@@ -1136,6 +1320,7 @@
     <label class="row"><span>Слияние ΔE {@render i('pal.merge')}</span> <b>{pparams.mergeDE}</b><input type="range" min="0" max="20" bind:value={pparams.mergeDE} /></label>
     <div class="row">
       <button class="primary" onclick={runPalette} disabled={!opened || !!busy}>Извлечь палитру</button>
+      {#if palette}<button onclick={exportCsv}>CSV</button>{/if}
       <label class="check"><input type="checkbox" bind:checked={showMarkers} /> маркеры на фото {@render i('pal.markers')}</label>
     </div>
     {#if palette}
@@ -1231,6 +1416,16 @@
 
   <details class="card diag">
     <summary>Диагностика: цели этапов, сверка GPU и CPU</summary>
+  <section>
+    <h2>Этап 5: проекты, экспорт, офлайн</h2>
+    <ul class="targets">
+      <li class={ok(swInfo?.version === VERSION)}>Офлайн: {swInfo ? `Service Worker ${swInfo.version}, в кэше ${swInfo.precached} файлов${swInfo.version === VERSION ? '' : ' (старая версия, перезапусти страницу)'}` : 'Service Worker не активен'}</li>
+      <li class={ok(!!storage?.persisted)}>Хранилище: {storage ? `${storage.kind === 'opfs' ? 'OPFS' : 'IndexedDB'}, ${storage.persisted ? 'persist() разрешён' : 'persist() не разрешён'}` : '—'}</li>
+      <li class={ok(!!net && !net.external.length && !net.bodies && !net.images.length)}>Сеть: {net ? `${net.total} запросов, к чужим доменам ${net.external.length}, с отправкой данных ${net.bodies}, с фото не из тестовых ${net.images.length}` : 'нажми «Проверить сеть»'}</li>
+    </ul>
+    <div class="row"><button onclick={auditNetwork}>Проверить сеть</button><button onclick={refreshProjects}>Обновить хранилище</button></div>
+    <p class="muted">Приёмка: в авиарежиме приложение с экрана «Домой» открывается и обрабатывает новое фото; трафарет PDF печатается в размер ±1 мм; в сети нет запросов с фото.</p>
+  </section>
   <section>
     <h2>Этап 4: тату-инструменты</h2>
     {#if opened}
@@ -1447,6 +1642,10 @@
   }
   .stage canvas { width: 100%; height: 100%; display: block; }
   .hint { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: var(--muted); pointer-events: none; }
+  .project { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .project img, .project .nothumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; background: var(--line, #ddd); flex: none; }
+  .project .inkrow { flex: 1; min-width: 0; }
+  .project.on .inkrow { outline: 2px solid var(--accent); }
   .file { display: inline-block; font-weight: 600; color: var(--accent); cursor: pointer; }
   .file input { display: block; margin-top: 6px; font-size: 13px; max-width: 100%; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }

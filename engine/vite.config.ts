@@ -45,9 +45,28 @@ function sharedFiles(): Plugin {
   };
 }
 
+// Files cached on install, besides the build's own assets. The 12/48 MP samples are big:
+// they are cached on first use instead.
+const PUBLIC_PRECACHE = ['./', 'manifest.webmanifest', 'icon-192.png', 'apple-touch-icon.png', 'art-paints.json'];
+
+/** Emits sw.js with the precache list of this build. */
+function serviceWorker(): Plugin {
+  return {
+    name: 'engine-service-worker',
+    apply: 'build',
+    generateBundle(_opts, bundle) {
+      const assets = Object.keys(bundle).filter((f) => f !== 'index.html' && !f.endsWith('.map') && !f.startsWith('samples/'));
+      const src = readFileSync(new URL('./dev/sw.js', import.meta.url), 'utf8')
+        .replace('__ENGINE_VERSION__', version)
+        .replace('self.__PRECACHE__', JSON.stringify([...PUBLIC_PRECACHE, ...assets]));
+      this.emitFile({ type: 'asset', fileName: 'sw.js', source: src });
+    },
+  };
+}
+
 export default defineConfig({
   base: './',
-  plugins: [svelte(), sharedFiles()],
+  plugins: [svelte(), sharedFiles(), serviceWorker()],
   define: {
     __ENGINE_VERSION__: JSON.stringify(version),
   },
