@@ -3,14 +3,15 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Stage 1 engine core for Vishar Color Study: Worker + WebGL2, Lab, Values, Notan, Temperature",
+  "description": "Vishar Color Study engine and debug page: Worker + WebGL2 analysis, tattoo tools, projects and offline",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
-    "test:gpu": "node scripts/gpu-parity.mjs"
+    "test:gpu": "node scripts/gpu-parity.mjs",
+    "test:offline": "node scripts/offline-check.mjs"
   },
   "dependencies": {
     "comlink": "^4.4.2"
