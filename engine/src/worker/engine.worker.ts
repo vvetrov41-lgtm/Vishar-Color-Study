@@ -19,8 +19,9 @@ import { histogramsFromLab8, type Histograms } from '../core/histogram';
 import { fitLongSide, HEADER_BYTES, parseImageInfo } from '../core/imageinfo';
 import { DEFAULT_VIEW, planView, renderReference, type Smoothing, type TattooStats, type ViewPlan, type ViewState } from '../core/view';
 import { levelOf, valuesThresholds } from '../core/values';
-import { Renderer, type ScreenRect } from '../gpu/renderer';
-import type { Caps, CompatCase, OpenOptions, OpenResult, PaletteResult, ParityCase, ParityReport, PickResult, StencilExport, SvgExport, ViewResult } from '../types';
+import { Renderer, smoothSigma, type ScreenRect } from '../gpu/renderer';
+import { PngWriter } from '../core/png';
+import type { Caps, CompatCase, FullExport, FullExportOptions, OpenOptions, OpenResult, PaletteResult, ParityCase, ParityReport, PickResult, StencilExport, SvgExport, ViewResult } from '../types';
 
 const now = () => performance.now();
 const round1 = (v: number) => Math.round(v * 10) / 10;
@@ -28,6 +29,10 @@ const round1 = (v: number) => Math.round(v * 10) / 10;
 interface Analysis { lab8: Uint8Array; hist: Histograms }
 
 export const LADDER = [1600, 1200, 800];
+/** Full-resolution export: long sides to step down to when the full frame does not fit. */
+export const EXPORT_LADDER = [6000, 4096];
+/** Widest blur kernel of an export tile (the preview caps it at 32 at work size). */
+const EXPORT_MAX_RADIUS = 96;
 /** Loupe size in working-copy pixels. */
 export const LOUPE = 21;
 
@@ -57,6 +62,8 @@ class Engine {
   /** Pigments before a focus is applied: the per-pixel index lets a tap find its pigment. */
   private pig: { key: string; rgba: Uint8ClampedArray; index: Int8Array; index2?: Int8Array; stats: NonNullable<TattooStats['pigments']>; ms: number } | null = null;
   private uploaded = '';
+  /** The opened file, kept for full-resolution exports (the pixels are not kept). */
+  private source: Blob | null = null;
   private progress: ((share: number, stage: string) => void) | null = null;
 
   private reset() {
@@ -312,6 +319,7 @@ class Engine {
     const work = { width: bitmap.width, height: bitmap.height };
     bitmap.close();
     this.reset();
+    this.source = blob;
     t.upload = now() - t0;
     for (const k in t) t[k] = round1(t[k]);
     return { info: { ...info, width: w, height: h, sizeFrom }, work, step, method, warnings, timings: t };
@@ -486,6 +494,91 @@ class Engine {
     const c = new OffscreenCanvas(r.w, r.h);
     c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(px.buffer as ArrayBuffer), r.w, r.h), 0, 0);
     return c.convertToBlob({ type: 'image/png' });
+  }
+
+  /**
+   * The current view at the source's full resolution (plan, «Фото 48 МП»): the frame is
+   * decoded once, rendered in tiles with a margin for the blur, and written band by band
+   * into a streaming PNG. Levels and thresholds come from the working copy, so every tile
+   * gets the same ones. Views computed on the CPU (Simplify, Drawing, Тату) have no
+   * full-resolution version: exportWork gives them at work size.
+   */
+  async exportFull(opts: FullExportOptions = {}): Promise<FullExport> {
+    const r = this.renderer, t0 = now(), notes: string[] = [];
+    if (!this.plan || !this.source) throw new Error('нечего экспортировать');
+    if (this.plan.view === 5) throw new Error('в полном размере экспортируются Оригинал, Values, Notan, Temp и Highlight');
+    const plan = this.plan, level = this.state.smoothing, blob = this.source;
+    const budget = (opts.budgetMB ?? 768) * 1024 * 1024;
+    let tile = opts.tile ?? 2048;
+    // Full frame first, then smaller long sides while the frame plus one band is over budget
+    // or the decode fails.
+    let full: ImageBitmap | null = null, srcW = 0, srcH = 0;
+    const tryDecode = async (long: number | null) => {
+      try {
+        if (long === null) return await createImageBitmap(blob, { imageOrientation: 'from-image', premultiplyAlpha: 'none' });
+        const [tw, th] = fitLongSide(srcW, srcH, long);
+        return await createImageBitmap(blob, { resizeWidth: tw, resizeHeight: th, resizeQuality: 'high', imageOrientation: 'from-image', premultiplyAlpha: 'none' });
+      } catch (e) {
+        notes.push(`${long ?? 'полный размер'}: ${(e as Error).message}`);
+        return null;
+      }
+    };
+    const header = parseImageInfo(new Uint8Array(await blob.slice(0, HEADER_BYTES).arrayBuffer()));
+    const fits = (w: number, h: number) => w * h * 4 + w * Math.min(tile, h) * 8 <= budget;
+    if (!header.width || !header.height || fits(header.width, header.height)) full = await tryDecode(null);
+    else notes.push(`${header.width}×${header.height} не влезает в бюджет ${opts.budgetMB ?? 768} МБ`);
+    if (full) { srcW = full.width; srcH = full.height; }
+    else { srcW = header.width || r.w; srcH = header.height || r.h; }
+    // Last rung: the working copy's size, which is always in memory anyway.
+    for (const long of [...EXPORT_LADDER, Math.max(r.w, r.h)]) {
+      if (full) break;
+      if (Math.max(srcW, srcH) <= long) continue;
+      const [tw, th] = fitLongSide(srcW, srcH, long);
+      if (!fits(tw, th)) { notes.push(`${tw}×${th} не влезает в бюджет`); continue; }
+      full = await tryDecode(long);
+      if (full) notes.push(`экспорт уменьшен до ${full.width}×${full.height}`);
+    }
+    if (!full) throw new Error('не хватило памяти даже на 4096 px: ' + notes.join('; '));
+    // Orientation: the header size may be before EXIF rotation; the decoded frame is after.
+    if (srcW !== full.width && srcH !== full.height && srcW === full.height) [srcW, srcH] = [srcH, srcW];
+    const W = full.width, H = full.height, tDecode = now() - t0;
+    const sigma = smoothSigma(level, Math.max(W, H)), radius = Math.min(EXPORT_MAX_RADIUS, Math.ceil(sigma * 3));
+    const margin = radius + 2, png = new PngWriter(W, H);
+    let tiles = 0, tRender = 0, tEncode = 0;
+    try {
+      for (let by = 0; by < H; by += tile) {
+        const bh = Math.min(tile, H - by), band = new Uint8Array(W * bh * 4);
+        for (let bx = 0; bx < W; bx += tile) {
+          const tw = Math.min(tile, W - bx), tr = now();
+          // Crop inside the frame: past the edges the texture clamps, as for the whole frame.
+          const x0 = Math.max(0, bx - margin), y0 = Math.max(0, by - margin);
+          const x1 = Math.min(W, bx + tw + margin), y1 = Math.min(H, by + bh + margin);
+          const crop = await createImageBitmap(full, x0, y0, x1 - x0, y1 - y0, { premultiplyAlpha: 'none' });
+          const px = r.renderTile(crop, plan, sigma, radius), cw = crop.width;
+          crop.close();
+          for (let y = 0; y < bh; y++) {
+            const s = ((by - y0 + y) * cw + (bx - x0)) * 4;
+            band.set(px.subarray(s, s + tw * 4), (y * W + bx) * 4);
+          }
+          tiles++;
+          tRender += now() - tr;
+          this.progress?.(Math.min(0.99, (by * W + (bx + tw) * bh) / (W * H)), 'export');
+        }
+        const te = now();
+        await png.addRows(band, bh);
+        tEncode += now() - te;
+      }
+    } finally {
+      full.close();
+    }
+    const te = now(), out = await png.finish();
+    tEncode += now() - te;
+    this.progress?.(1, 'done');
+    if (W !== srcW || H !== srcH) notes.unshift(`${W}×${H} вместо ${srcW}×${srcH}`);
+    return {
+      blob: out, width: W, height: H, sourceWidth: srcW, sourceHeight: srcH, tile, tiles, notes: W === srcW ? [] : notes,
+      ms: { decode: round1(tDecode), render: round1(tRender), encode: round1(tEncode), total: round1(now() - t0) },
+    };
   }
 
   /**

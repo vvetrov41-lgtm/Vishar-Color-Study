@@ -4,7 +4,7 @@
 import * as Comlink from 'comlink';
 import type { ViewState } from './core/view';
 import type { PaletteParams } from './core/palette';
-import type { Caps, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, StencilExport, SvgExport, ViewResult } from './types';
+import type { Caps, FullExport, FullExportOptions, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, StencilExport, SvgExport, ViewResult } from './types';
 import type { EngineApi } from './worker/engine.worker';
 
 type Resolver = { ok: (r: ViewResult) => void; fail: (e: unknown) => void };
@@ -132,6 +132,12 @@ export class EngineClient {
   async exportCalibrated(): Promise<Blob> {
     await this.settled();
     return this.api.exportCalibrated();
+  }
+
+  /** Current view at the source's full resolution, tiled (Оригинал, Values, Notan, Temp, Highlight). */
+  async exportFull(opts?: FullExportOptions): Promise<FullExport> {
+    await this.settled();
+    return this.api.exportFull(opts);
   }
 
   async exportWork(): Promise<Blob> {

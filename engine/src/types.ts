@@ -85,6 +85,27 @@ export interface SvgExport {
   ms: number;
 }
 
+export interface FullExportOptions {
+  /** Tile side, px; smaller on retry after a memory error. */
+  tile?: number;
+  /** Memory budget for the full frame plus one band, MB. */
+  budgetMB?: number;
+}
+
+export interface FullExport {
+  blob: Blob;
+  width: number;
+  height: number;
+  /** Source size; width × height is smaller when the ladder had to step down. */
+  sourceWidth: number;
+  sourceHeight: number;
+  tile: number;
+  tiles: number;
+  /** Why the export is smaller than the source, empty when it is not. */
+  notes: string[];
+  ms: { decode: number; render: number; encode: number; total: number };
+}
+
 export interface StencilExport {
   pdf: Uint8Array;
   pageMm: [number, number];

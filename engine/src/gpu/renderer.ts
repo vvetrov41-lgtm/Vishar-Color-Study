@@ -12,6 +12,9 @@ interface Target { tex: WebGLTexture; fbo: WebGLFramebuffer; w: number; h: numbe
 export const SMOOTH_SIGMA: Record<Smoothing, number> = { 0: 0, 1: 1.5, 2: 4 };
 
 /** Where the view lands: on screen (letterboxed, with background) or into pixels at work size. */
+/** Blur sigma of a smoothing level for an image of this long side: the same look at any size. */
+export const smoothSigma = (level: Smoothing, long: number) => (level ? Math.max(0.5, (SMOOTH_SIGMA[level] * long) / 1600) : 0);
+
 export interface ScreenRect { x: number; y: number; w: number; h: number }
 
 function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
@@ -169,7 +172,7 @@ export class Renderer {
     if (!level) return this.src;
     const cached = this.smoothed.get(level);
     if (cached) return cached.tex;
-    const gl = this.gl, sigma = Math.max(0.5, (SMOOTH_SIGMA[level] * Math.max(this.w, this.h)) / 1600);
+    const gl = this.gl, sigma = smoothSigma(level, Math.max(this.w, this.h));
     const radius = Math.min(32, Math.ceil(sigma * 3));
     this.tmp ??= this.target(this.w, this.h);
     const out = this.target(this.w, this.h, true);
@@ -250,6 +253,41 @@ export class Renderer {
     this.setViewUniforms(plan, { x: 0, y: 0, w: 1, h: 1 }, false, [0, 0, 0], [1 / this.w, 1 / this.h]);
     this.draw(this.viewP, src, this.pixels, this.w, this.h);
     return this.read(this.pixels);
+  }
+
+  /**
+   * One tile of a full-resolution export: the view of a crop of the full frame, blurred with
+   * the given sigma first. The caller crops with a margin of at least the blur radius, so the
+   * blur sees past the tile's edges, and keeps only the centre. Everything is freed after.
+   */
+  renderTile(bitmap: ImageBitmap, plan: ViewPlan, sigma: number, radius: number): Uint8Array {
+    const gl = this.gl, w = bitmap.width, h = bitmap.height, made: Target[] = [];
+    const src = this.texture(0, 0);
+    gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+    try {
+      let tex = src;
+      if (sigma > 0) {
+        const a = this.target(w, h), b = this.target(w, h);
+        made.push(a, b);
+        for (const [from, to, step] of [[src, a, [1 / w, 0]], [a.tex, b, [0, 1 / h]]] as const) {
+          gl.useProgram(this.blurP.p);
+          gl.uniform2f(this.blurP.u('uStep'), step[0], step[1]);
+          gl.uniform1f(this.blurP.u('uSigma'), sigma);
+          gl.uniform1i(this.blurP.u('uRadius'), radius);
+          this.draw(this.blurP, from, to, w, h);
+        }
+        tex = b.tex;
+      }
+      const out = this.target(w, h);
+      made.push(out);
+      this.setViewUniforms(plan, { x: 0, y: 0, w: 1, h: 1 }, false, [0, 0, 0], [1 / w, 1 / h]);
+      this.draw(this.viewP, tex, out, w, h);
+      return this.read(out);
+    } finally {
+      gl.deleteTexture(src);
+      made.forEach((t) => this.drop(t));
+    }
   }
 
   /** The working copy exactly as the GPU sees it (input for the CPU reference). */

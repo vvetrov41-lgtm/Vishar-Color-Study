@@ -62,8 +62,7 @@ out vec4 outColor;
 void main() {
   vec4 acc = vec4(0.0);
   float ws = 0.0;
-  for (int i = -32; i <= 32; i++) {
-    if (i < -uRadius || i > uRadius) continue;
+  for (int i = -uRadius; i <= uRadius; i++) {
     float w = exp(-float(i * i) / (2.0 * uSigma * uSigma));
     acc += w * texture(uSrc, vUv + uStep * float(i));
     ws += w;
