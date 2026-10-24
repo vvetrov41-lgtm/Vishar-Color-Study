@@ -13,7 +13,7 @@
   import { alternatives, evenTones, GREY_SERIES, INK_BRANDS, inkById, inkRecipe, nearestInks } from '../src/core/pigments';
   import { HINTS } from './hints';
   import { askPersist, deleteProject, exportProjectFile, getBlob, importProjectFile, listProjects, renameProject, saveProject, saveView, storageInfo, type ProjectMeta, type StorageInfo } from './projects';
-  import type { OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
+  import type { FullExport, OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
 
   const VERSION = __ENGINE_VERSION__;
   const SAMPLES: Array<[string, string]> = [
@@ -369,6 +369,8 @@
             importBytes: async (b: number[]) => { const m = await importProjectFile(new Blob([new Uint8Array(b)])); await refreshProjects(); return m.name; },
             remove: async (k: number) => { await deleteProject(projects[k].id); await refreshProjects(); return projects.length; },
           },
+          full: async (opts?: { tile?: number; budgetMB?: number }) => { const r = await engine!.exportFull(opts); return { ...r, blob: undefined, bytes: Array.from(new Uint8Array(await r.blob.arrayBuffer())) }; },
+          work: async () => Array.from(new Uint8Array(await (await engine!.exportWork()).arrayBuffer())),
           sw: () => $state.snapshot(swInfo),
           net: () => { auditNetwork(); return $state.snapshot(net); },
         },
@@ -697,6 +699,7 @@
       standalone: matchMedia('(display-mode: standalone)').matches,
       caps: engine?.caps,
       open: opened,
+      fullExport: fullLog ? { ...$state.snapshot(fullLog), blob: undefined, bytes: fullLog.blob.size } : null,
       view: $state.snapshot(vs),
       lastFrame: last ? { timings: last.timings, roundTripMs: last.roundTripMs, stats: last.stats } : null,
       slider: { frames: slider.n, maxMs: slider.max, p95Ms: p95(slider.samples), meanMs: slider.n ? Math.round((slider.sum / slider.n) * 10) / 10 : 0 },
@@ -807,6 +810,42 @@
     }
   }
 
+  // Export of the current view: GPU views at the source's full size (tiled), the rest at work size.
+  let fullInfo = $state('');
+  let fullLog = $state<FullExport | null>(null);
+  const FULL_VIEWS = ['original', 'values', 'notan', 'temperature', 'highlight'];
+  async function exportView() {
+    if (!engine || !opened) return;
+    error = ''; fullInfo = '';
+    const name = `vishar-${section === 'palette' ? 'original' : section}${section === 'tattoo' ? '-' + vs.tattoo.tool : ''}`;
+    try {
+      if (!FULL_VIEWS.includes(vs.view)) {
+        busy = 'Готовлю PNG…';
+        await shareFile(await engine.exportWork(), `${name}.png`);
+        fullInfo = `PNG в размере рабочей копии ${last?.work?.width ?? ''}×${last?.work?.height ?? ''}: этот раздел считается только на ней.`;
+        return;
+      }
+      busy = 'Экспорт в полном размере…';
+      let r: FullExport;
+      try {
+        r = await engine.exportFull();
+      } catch (e) {
+        // A tile too big for the GPU or memory: once more with smaller tiles.
+        busy = 'Повторяю меньшими тайлами…';
+        r = await engine.exportFull({ tile: 1024 });
+        r.notes.push(`тайлы 2048 не прошли: ${(e as Error).message}`);
+      }
+      fullLog = r;
+      await shareFile(r.blob, `${name}-${r.width}x${r.height}.png`);
+      fullInfo = `PNG ${r.width}×${r.height}, ${(r.blob.size / 1048576).toFixed(1)} МБ, ${r.tiles} тайлов, ${(r.ms.total / 1000).toFixed(1)} с${r.notes.length ? ` · ${r.notes[0]}` : ''}${chain.length > 1 ? ' · в работе результат прошлого раздела, его размер = рабочая копия' : ''}`;
+    } catch (e) {
+      error = `Экспорт: ${(e as Error).message}`;
+    } finally {
+      busy = '';
+      progress = 0;
+    }
+  }
+
   async function exportPng() {
     if (!engine) return;
     const blob = await engine.exportWork();
@@ -897,8 +936,10 @@
         <button onclick={() => stepBack()} disabled={!!busy}>Шаг назад</button>
         <button onclick={() => stepBack(true)} disabled={!!busy}>К оригиналу</button>
       {/if}
+      <button onclick={exportView} disabled={!!busy}>⤓ PNG</button>
       {@render i('chain')}
     </div>
+    {#if fullInfo}<p class="muted">{fullInfo}</p>{/if}
   {/if}
 
   <nav class="tabs">
@@ -1421,6 +1462,7 @@
     <ul class="targets">
       <li class={ok(swInfo?.version === VERSION)}>Офлайн: {swInfo ? `Service Worker ${swInfo.version}, в кэше ${swInfo.precached} файлов${swInfo.version === VERSION ? '' : ' (старая версия, перезапусти страницу)'}` : 'Service Worker не активен'}</li>
       <li class={ok(!!storage?.persisted)}>Хранилище: {storage ? `${storage.kind === 'opfs' ? 'OPFS' : 'IndexedDB'}, ${storage.persisted ? 'persist() разрешён' : 'persist() не разрешён'}` : '—'}</li>
+      <li class={ok(!!fullLog && !fullLog.notes.length)}>PNG в полном размере: {fullLog ? `${fullLog.width}×${fullLog.height} из ${fullLog.sourceWidth}×${fullLog.sourceHeight}, ${fullLog.tiles} тайлов по ${fullLog.tile}, декод ${fullLog.ms.decode} мс, рендер ${fullLog.ms.render}, сжатие ${fullLog.ms.encode}, всего ${fullLog.ms.total}${fullLog.notes.length ? ' · ' + fullLog.notes.join('; ') : ''}` : 'открой 48 МП и нажми ⤓ PNG в Values'}</li>
       <li class={ok(!!net && !net.external.length && !net.bodies && !net.images.length)}>Сеть: {net ? `${net.total} запросов, к чужим доменам ${net.external.length}, с отправкой данных ${net.bodies}, с фото не из тестовых ${net.images.length}` : 'нажми «Проверить сеть»'}</li>
     </ul>
     <div class="row"><button onclick={auditNetwork}>Проверить сеть</button><button onclick={refreshProjects}>Обновить хранилище</button></div>

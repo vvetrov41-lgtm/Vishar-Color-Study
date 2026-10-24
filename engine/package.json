@@ -11,7 +11,8 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:gpu": "node scripts/gpu-parity.mjs",
-    "test:offline": "node scripts/offline-check.mjs"
+    "test:offline": "node scripts/offline-check.mjs",
+    "test:full": "node scripts/full-export-check.mjs"
   },
   "dependencies": {
     "comlink": "^4.4.2"
