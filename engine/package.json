@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Vishar Color Study engine and debug page: Worker + WebGL2 analysis, tattoo tools, projects and offline",
+  "description": "Vishar Color Study: working prototype (RU/EN/ES) on a Worker + WebGL2 engine, tattoo tools, projects and offline",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:gpu": "node scripts/gpu-parity.mjs",
     "test:offline": "node scripts/offline-check.mjs",
-    "test:full": "node scripts/full-export-check.mjs"
+    "test:full": "node scripts/full-export-check.mjs",
+    "test:ui": "node scripts/ui-check.mjs"
   },
   "dependencies": {
     "comlink": "^4.4.2"

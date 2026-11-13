@@ -123,7 +123,7 @@ try {
     await snap('hint');
     await scan('hint');
 
-    const unnamed = await page.evaluate(() => [...document.querySelectorAll('button')].filter((b) => !(b.innerText.trim() || b.getAttribute('aria-label'))).map((b) => b.outerHTML.slice(0, 160)));
+    const unnamed = await page.evaluate(() => [...document.querySelectorAll('button')].filter((b) => !(b.textContent.trim() || b.getAttribute('aria-label'))).map((b) => b.outerHTML.slice(0, 160)));
     check(unnamed.length === 0, `${lang}: every button has a name${unnamed.length ? ': ' + unnamed.join(' | ') : ''}`);
     check(!leaks.size, `${lang}: no Russian on English/Spanish screens${leaks.size ? '\n  ' + [...leaks].slice(0, 20).join('\n  ') : ''}`);
     check(!errors.length, `${lang}: no page errors${errors.length ? ': ' + errors.slice(0, 5).join(' | ') : ''}`);

@@ -1045,6 +1045,7 @@
         <span style="background: {picked.info.codes.HEX}"></span>
       </div>
     {/if}
+    {#if !opened}<div class="cover"></div>{/if}
     {#if !opened && !busy}<p class="hint">{engine ? t('stage.empty') : error ? '' : t('stage.starting')}</p>{/if}
     {#if busy}<p class="hint" role="status">{busy}</p>{/if}
     {#if progress > 0}<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(progress * 100)}><span style="width: {Math.round(progress * 100)}%"></span></div>{/if}
@@ -1081,6 +1082,7 @@
     {:else if section === 'palette'}
       <p class="muted">{t('pal.hint')}</p>
     {/if}
+    {#if opened}
     {#if vs.view === 'values'}
       <label class="row"><span>{t('values.levels')} {@render i('values.levels')}</span> <b>{vs.values.levels}</b><input type="range" min="2" max="20" bind:value={vs.values.levels} /></label>
       <div class="row">
@@ -1337,6 +1339,7 @@
     {/if}
 
     {#if vs.view !== 'original' && vs.view !== 'simplify' && vs.view !== 'drawing' && vs.view !== 'tattoo'}<canvas class="hist" bind:this={hcanvas} aria-hidden="true"></canvas>{/if}
+    {/if}
     {#if last?.stats.simplify}
       {@const s = last.stats.simplify}
       <p class="muted">{t('simp.stats', { regions: s.regions, colors: s.colors })}{s.inkShare ? ` · ${t('simp.darkShare', { p: num(s.inkShare * 100) })}` : ''} · {s.ms.total} {t('unit.ms')}{last.timings.computeMs ? '' : ` · ${t('common.cached')}`}</p>
@@ -1966,6 +1969,8 @@
   li.fail::before { content: '✕'; }
   .error { color: var(--bad); font-size: 13px; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
+  .cover { position: absolute; inset: 0; background: var(--stage); pointer-events: none; }
+  .stage:has(.cover) { height: 140px; }
   .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .top { display: flex; align-items: center; gap: 8px; }
   .brand { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
