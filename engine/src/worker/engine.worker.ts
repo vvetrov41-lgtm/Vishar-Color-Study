@@ -529,12 +529,16 @@ class Engine {
     const fits = (w: number, h: number) => w * h * 4 + w * Math.min(tile, h) * 8 <= budget;
     if (!header.width || !header.height || fits(header.width, header.height)) full = await tryDecode(null);
     else notes.push(`${header.width}×${header.height} не влезает в бюджет ${opts.budgetMB ?? 768} МБ`);
+    // Unknown size (no header, full decode failed): the working copy gives the aspect, and
+    // only its own size is tried, since the source may be smaller than the other rungs.
+    const known = !!full || !!(header.width && header.height);
     if (full) { srcW = full.width; srcH = full.height; }
     else { srcW = header.width || r.w; srcH = header.height || r.h; }
     // Last rung: the working copy's size, which is always in memory anyway.
-    for (const long of [...EXPORT_LADDER, Math.max(r.w, r.h)]) {
+    const last = Math.max(r.w, r.h);
+    for (const long of [...EXPORT_LADDER, last]) {
       if (full) break;
-      if (Math.max(srcW, srcH) <= long) continue;
+      if (known ? Math.max(srcW, srcH) <= long : long !== last) continue;
       const [tw, th] = fitLongSide(srcW, srcH, long);
       if (!fits(tw, th)) { notes.push(`${tw}×${th} не влезает в бюджет`); continue; }
       full = await tryDecode(long);
@@ -557,7 +561,7 @@ class Engine {
           const x0 = Math.max(0, bx - margin), y0 = Math.max(0, by - margin);
           const x1 = Math.min(W, bx + tw + margin), y1 = Math.min(H, by + bh + margin);
           const crop = await createImageBitmap(full, x0, y0, x1 - x0, y1 - y0, { premultiplyAlpha: 'none' });
-          const px = r.renderTile(crop, plan, sigma, radius), cw = crop.width;
+          const px = r.renderTile(crop, plan, sigma, radius, [x0, y0]), cw = crop.width;
           crop.close();
           for (let y = 0; y < bh; y++) {
             const s = ((by - y0 + y) * cw + (bx - x0)) * 4;

@@ -232,6 +232,7 @@ export class Renderer {
     gl.uniform1f(p.u('uHlTol'), plan.hlTol);
     gl.uniform1i(p.u('uHlMode'), plan.hlMode);
     gl.uniform2f(p.u('uStep'), step[0], step[1]);
+    gl.uniform2f(p.u('uOrigin'), 0, 0);
     gl.uniform4f(p.u('uRect'), rect.x, rect.y, rect.w, rect.h);
     gl.uniform1i(p.u('uFlip'), flip ? 1 : 0);
     gl.uniform4f(p.u('uBg'), bg[0] / 255, bg[1] / 255, bg[2] / 255, 1);
@@ -260,7 +261,7 @@ export class Renderer {
    * the given sigma first. The caller crops with a margin of at least the blur radius, so the
    * blur sees past the tile's edges, and keeps only the centre. Everything is freed after.
    */
-  renderTile(bitmap: ImageBitmap, plan: ViewPlan, sigma: number, radius: number): Uint8Array {
+  renderTile(bitmap: ImageBitmap, plan: ViewPlan, sigma: number, radius: number, origin: [number, number] = [0, 0]): Uint8Array {
     const gl = this.gl, w = bitmap.width, h = bitmap.height, made: Target[] = [];
     const src = this.texture(0, 0);
     gl.bindTexture(gl.TEXTURE_2D, src);
@@ -282,6 +283,8 @@ export class Renderer {
       const out = this.target(w, h);
       made.push(out);
       this.setViewUniforms(plan, { x: 0, y: 0, w: 1, h: 1 }, false, [0, 0, 0], [1 / w, 1 / h]);
+      // The crop's place in the full frame, so the outline dashes run on across tiles.
+      this.gl.uniform2f(this.viewP.u('uOrigin'), origin[0], origin[1]);
       this.draw(this.viewP, tex, out, w, h);
       return this.read(out);
     } finally {

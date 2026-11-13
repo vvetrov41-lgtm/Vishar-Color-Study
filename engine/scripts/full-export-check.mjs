@@ -23,7 +23,8 @@ try {
   await page.evaluate(() => window.__engineDev.open('fixtures/landscape_1k.png'));
   const views = [
     ['original', {}], ['values', {}], ['notan', {}], ['temperature', {}],
-    ['highlight', { highlight: { target: [60, -20, -20], tolerance: 12, mode: 'outline' } }],
+    // Tolerance 20 gives long outlines across the 200 px tile seams, where the dashes must run on.
+    ['highlight', { highlight: { target: [60, -20, -20], tolerance: 20, mode: 'outline' } }],
   ];
   for (const smoothing of [0, 2]) {
     for (const [view, extra] of views) {
