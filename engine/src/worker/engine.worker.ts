@@ -21,6 +21,7 @@ import { DEFAULT_VIEW, planView, renderReference, type Smoothing, type TattooSta
 import { levelOf, valuesThresholds } from '../core/values';
 import { Renderer, smoothSigma, type ScreenRect } from '../gpu/renderer';
 import { PngWriter } from '../core/png';
+import { gridGeometry, paintGrid, type GridParams } from '../core/grid';
 import type { Caps, CompatCase, FullExport, FullExportOptions, OpenOptions, OpenResult, PaletteResult, ParityCase, ParityReport, PickResult, StencilExport, SvgExport, ViewResult } from '../types';
 
 const now = () => performance.now();
@@ -487,10 +488,11 @@ class Engine {
   }
 
   /** Working copy rendered with the current view at work size, as PNG. */
-  async exportWork(): Promise<Blob> {
+  async exportWork(grid: GridParams | null = null): Promise<Blob> {
     const r = this.renderer;
     if (!this.plan) throw new Error('нечего экспортировать');
     const px = r.renderPixels(this.plan, this.state.smoothing);
+    if (grid) paintGrid(px, r.w, r.h, 0, r.h, grid);
     const c = new OffscreenCanvas(r.w, r.h);
     c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(px.buffer as ArrayBuffer), r.w, r.h), 0, 0);
     return c.convertToBlob({ type: 'image/png' });
@@ -544,6 +546,7 @@ class Engine {
     const W = full.width, H = full.height, tDecode = now() - t0;
     const sigma = smoothSigma(level, Math.max(W, H)), radius = Math.min(EXPORT_MAX_RADIUS, Math.ceil(sigma * 3));
     const margin = radius + 2, png = new PngWriter(W, H);
+    const grid = opts.grid ?? null, geom = grid ? gridGeometry(grid, W, H) : null;
     let tiles = 0, tRender = 0, tEncode = 0;
     try {
       for (let by = 0; by < H; by += tile) {
@@ -564,6 +567,7 @@ class Engine {
           tRender += now() - tr;
           this.progress?.(Math.min(0.99, (by * W + (bx + tw) * bh) / (W * H)), 'export');
         }
+        if (grid) paintGrid(band, W, H, by, bh, grid, geom!);
         const te = now();
         await png.addRows(band, bh);
         tEncode += now() - te;

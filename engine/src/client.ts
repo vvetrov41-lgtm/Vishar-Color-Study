@@ -2,6 +2,7 @@
 // Worker and coalesces slider input so the Worker never builds a backlog.
 
 import * as Comlink from 'comlink';
+import type { GridParams } from './core/grid';
 import type { ViewState } from './core/view';
 import type { PaletteParams } from './core/palette';
 import type { Caps, FullExport, FullExportOptions, OpenOptions, OpenResult, PaletteResult, ParityReport, PickResult, StencilExport, SvgExport, ViewResult } from './types';
@@ -140,9 +141,10 @@ export class EngineClient {
     return this.api.exportFull(opts);
   }
 
-  async exportWork(): Promise<Blob> {
+  /** Current view at work size; with `grid`, the drawing grid is painted in (export only). */
+  async exportWork(grid?: GridParams | null): Promise<Blob> {
     await this.settled();
-    return this.api.exportWork();
+    return this.api.exportWork(grid ?? null);
   }
 
   selftest(fixtures: Record<string, string>): Promise<ParityReport> {

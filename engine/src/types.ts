@@ -1,3 +1,4 @@
+import type { GridParams } from './core/grid';
 import type { ColorInfo } from './core/colorinfo';
 import type { ImageInfo } from './core/imageinfo';
 import type { Palette } from './core/palette';
@@ -90,6 +91,8 @@ export interface FullExportOptions {
   tile?: number;
   /** Memory budget for the full frame plus one band, MB. */
   budgetMB?: number;
+  /** Drawing grid burnt into the exported image. */
+  grid?: GridParams | null;
 }
 
 export interface FullExport {

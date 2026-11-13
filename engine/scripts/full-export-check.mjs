@@ -40,6 +40,26 @@ try {
       check(tiled.width === whole.width && tiled.height === whole.height && bad <= whole.width * whole.height * 1e-4, `${view}, smoothing ${smoothing}: ${r.tiles} tiles, max diff ${max}, pixels off by >1: ${bad}`);
     }
   }
+  // Drawing grid burnt into the export: the same lines in the whole frame and in tiles, and
+  // the image changes only on the grid (a quarter of the cells' inside stays untouched).
+  await page.evaluate(() => window.__engineDev.set({ view: 'values', smoothing: 0 }));
+  await page.evaluate(() => window.__engineDev.grid({ on: true, inExport: true, mode: 'cells', cols: 5, square: true, sub: 2, diagonals: true, color: 'accent', opacity: 0.9 }));
+  {
+    const plain = decode(await page.evaluate(() => window.__engineDev.work(false)));
+    const whole = decode(await page.evaluate(() => window.__engineDev.work(true)));
+    const tiled = decode((await page.evaluate(() => window.__engineDev.full({ tile: 256, grid: true }))).bytes);
+    let changed = 0, mismatch = 0;
+    for (let i = 0; i < whole.width * whole.height; i++) {
+      let d = 0, m = 0;
+      for (let c = 0; c < 3; c++) { d = Math.max(d, Math.abs(whole.data[i * 4 + c] - plain.data[i * 4 + c])); m = Math.max(m, Math.abs(whole.data[i * 4 + c] - tiled.data[i * 4 + c])); }
+      if (d > 0) changed++;
+      if (m > 1) mismatch++;
+    }
+    const share = changed / (whole.width * whole.height);
+    check(share > 0.01 && share < 0.3 && mismatch <= whole.width * whole.height * 1e-4, `grid in export: ${(share * 100).toFixed(1)}% of pixels on the grid, tiled vs whole off by >1: ${mismatch}`);
+  }
+  await page.evaluate(() => window.__engineDev.grid({ on: false }));
+
   await page.evaluate(() => window.__engineDev.open('samples/synth_12mp.jpg'));
   await page.evaluate(() => window.__engineDev.set({ view: 'values', smoothing: 1 }));
   const big = await page.evaluate(() => window.__engineDev.full());

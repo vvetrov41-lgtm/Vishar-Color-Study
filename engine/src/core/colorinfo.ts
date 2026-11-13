@@ -98,27 +98,41 @@ export function temperatureOf(lab: Lab): { label: Temperature; warmth: number } 
   return { label, warmth: r1(w) };
 }
 
-/** Plain Russian name from hue, saturation and lightness ("стандартное имя"). */
-export function colorName(rgb: Rgb): string {
+export type HueName = 'red' | 'orange' | 'yellow' | 'yellowGreen' | 'green' | 'turquoise' | 'lightBlue' | 'blue' | 'violet' | 'purple' | 'crimson' | 'brown' | 'black' | 'white' | 'grey';
+
+/** Language-neutral parts of the plain name: a base hue, dark/light and «muted». */
+export interface NameParts { base: HueName; tone: 'dark' | 'light' | ''; muted: boolean }
+
+export function colorNameParts(rgb: Rgb): NameParts {
   const lab = srgbToLab(...rgb), [L, C] = lch(lab), [h, s] = hsv(rgb);
   if (C < 6 || s < 0.1) {
-    if (L < 12) return 'чёрный';
-    if (L > 94) return 'белый';
-    return L < 35 ? 'тёмно-серый' : L > 75 ? 'светло-серый' : 'серый';
+    if (L < 12) return { base: 'black', tone: '', muted: false };
+    if (L > 94) return { base: 'white', tone: '', muted: false };
+    return { base: 'grey', tone: L < 35 ? 'dark' : L > 75 ? 'light' : '', muted: false };
   }
-  const SECTORS: Array<[number, string]> = [
-    [15, 'красный'], [40, 'оранжевый'], [65, 'жёлтый'], [90, 'жёлто-зелёный'], [150, 'зелёный'],
-    [190, 'бирюзовый'], [215, 'голубой'], [255, 'синий'], [290, 'фиолетовый'], [320, 'пурпурный'],
-    [345, 'малиновый'], [360, 'красный'],
+  const SECTORS: Array<[number, HueName]> = [
+    [15, 'red'], [40, 'orange'], [65, 'yellow'], [90, 'yellowGreen'], [150, 'green'],
+    [190, 'turquoise'], [215, 'lightBlue'], [255, 'blue'], [290, 'violet'], [320, 'purple'],
+    [345, 'crimson'], [360, 'red'],
   ];
   let base = SECTORS.find(([end]) => h < end)![1];
-  if ((base === 'оранжевый' || base === 'красный' || base === 'жёлтый') && L < 45 && h < 60) base = 'коричневый';
-  const parts = [];
-  if (s < 0.35 && base !== 'коричневый') parts.push('приглушённый');
+  if ((base === 'orange' || base === 'red' || base === 'yellow') && L < 45 && h < 60) base = 'brown';
   // Brown is dark by definition: only very dark brown gets the prefix.
-  const tone = L < (base === 'коричневый' ? 20 : 35) ? 'тёмно-' : L > 78 ? 'светло-' : '';
-  parts.push(tone + base);
-  return parts.join(' ');
+  const tone = L < (base === 'brown' ? 20 : 35) ? 'dark' : L > 78 ? 'light' : '';
+  return { base, tone, muted: s < 0.35 && base !== 'brown' };
+}
+
+const RU_HUE: Record<HueName, string> = {
+  red: 'красный', orange: 'оранжевый', yellow: 'жёлтый', yellowGreen: 'жёлто-зелёный', green: 'зелёный', turquoise: 'бирюзовый',
+  lightBlue: 'голубой', blue: 'синий', violet: 'фиолетовый', purple: 'пурпурный', crimson: 'малиновый', brown: 'коричневый',
+  black: 'чёрный', white: 'белый', grey: 'серый',
+};
+
+/** Plain Russian name from hue, saturation and lightness ("стандартное имя"). */
+export function colorName(rgb: Rgb): string {
+  const p = colorNameParts(rgb);
+  const word = (p.tone === 'dark' ? 'тёмно-' : p.tone === 'light' ? 'светло-' : '') + RU_HUE[p.base];
+  return p.muted ? `приглушённый ${word}` : word;
 }
 
 /** Opposite hue in LCh at the same lightness; chroma is reduced until it fits sRGB. */
@@ -142,6 +156,7 @@ export interface ColorInfo {
   saturation: number;
   temperature: { label: Temperature; warmth: number };
   name: string;
+  nameParts: NameParts;
   complementary: Rgb;
   codes: ColorCodes;
 }
@@ -151,7 +166,7 @@ export function colorInfo(rgb: Rgb): ColorInfo {
   const lab = srgbToLab(...c), [L, C, H] = lch(lab);
   return {
     rgb: c, lab: lab.map(r1) as Lab, value: r1(L), hue: Math.round(H), chroma: r1(C), saturation: pct(hsv(c)[1]),
-    temperature: temperatureOf(lab), name: colorName(c), complementary: complementary(c), codes: colorCodes(c),
+    temperature: temperatureOf(lab), name: colorName(c), nameParts: colorNameParts(c), complementary: complementary(c), codes: colorCodes(c),
   };
 }
 
