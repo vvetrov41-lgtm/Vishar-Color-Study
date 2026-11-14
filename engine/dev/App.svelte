@@ -123,7 +123,11 @@
   const touches = new Map<number, { x: number; y: number }>();
   let gesture: { d: number; mx: number; my: number; z: { s: number; x: number; y: number } } | null = null;
   // The first finger of a pinch lands alone and already picks: the pinch puts the pick back.
-  let beforePick: { picked: PickResult | null; current: { info: ColorInfo; from: string } | null; target: ViewState["highlight"]["target"] } | null = null;
+  // The same for a Values level and a skin tile. A pinch consumes every finger in it: until
+  // all are lifted, nothing picks, and answers still in flight are dropped.
+  let beforePick: { picked: PickResult | null; current: { info: ColorInfo; from: string } | null; target: ViewState['highlight']['target']; level: number; skin: ViewState['tattoo']['skin'] } | null = null;
+  let consumed = false;
+  let pinches = 0;
   function clampZoom(z: { s: number; x: number; y: number }) {
     const s = Math.min(ZOOM_MAX, Math.max(1, z.s));
     return { s, x: Math.min(0, Math.max(stageW - stageW * s, z.x)), y: Math.min(0, Math.max(stageH - stageH * s, z.y)) };
@@ -138,6 +142,7 @@
     zoom = { s: 1, x: 0, y: 0 };
     touches.clear();
     gesture = null;
+    consumed = false;
     release();
     document.body.classList.toggle('noscroll', on);
   }
@@ -148,17 +153,22 @@
   function gestureStart() {
     const [a, b] = [...touches.values()];
     gesture = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, z: { ...zoom } };
+    consumed = true;
+    pinches++;
     release();
     if (beforePick) {
-      ({ picked, current } = beforePick);
-      if (vs.view === 'highlight') vs.highlight = { ...vs.highlight, target: beforePick.target };
+      const b = beforePick;
+      ({ picked, current } = b);
+      if (vs.highlight.target !== b.target) vs.highlight = { ...vs.highlight, target: b.target };
+      if (vs.values.highlight !== b.level) vs.values.highlight = b.level;
+      if (vs.tattoo.skin !== b.skin) vs.tattoo.skin = b.skin;
       beforePick = null;
     }
   }
   function stageDown(e: PointerEvent) {
     if (!full) return;
     touches.set(e.pointerId, stagePoint(e));
-    if (touches.size === 1) beforePick = { picked, current, target: vs.highlight.target };
+    if (touches.size === 1) beforePick = { picked, current, target: vs.highlight.target, level: vs.values.highlight, skin: vs.tattoo.skin };
     if (touches.size === 2) gestureStart();
   }
   function stageMove(e: PointerEvent) {
@@ -174,6 +184,7 @@
     touches.delete(e.pointerId);
     if (touches.size < 2) gesture = null;
     if (touches.size === 2) gestureStart();
+    if (touches.size === 0) consumed = false;
   }
   function stageWheel(e: WheelEvent) {
     if (!full) return;
@@ -649,7 +660,7 @@
   }
 
   async function tap(e: PointerEvent) {
-    if (!engine || gesture) return;
+    if (!engine || consumed) return;
     // Тату → Кожа, all tones: a tap on a tile opens that tone.
     if (vs.view === 'tattoo' && vs.tattoo.tool === 'skin' && vs.tattoo.skin.show === 'all' && last) {
       const r = canvas.getBoundingClientRect();
@@ -666,7 +677,8 @@
     }
     if (tool !== 'level') return;
     const r = canvas.getBoundingClientRect(), k = canvas.clientWidth / r.width;
-    const lev = await engine.pick((e.clientX - r.left) * k, (e.clientY - r.top) * k);
+    const n = pinches, lev = await engine.pick((e.clientX - r.left) * k, (e.clientY - r.top) * k);
+    if (consumed || n !== pinches) return;
     vs.values.highlight = lev === vs.values.highlight ? -1 : lev;
   }
 
@@ -683,24 +695,24 @@
     const u = (cx / r.width - last.rect.x) / last.rect.w, v = (cy / r.height - last.rect.y) / last.rect.h;
     const t0 = performance.now();
     try {
-      const p = await engine.pickColor(u, v, sampleSize);
-      if (p && !gesture) {
+      const n = pinches, p = await engine.pickColor(u, v, sampleSize);
+      if (p && !consumed && n === pinches) {
         picked = p;
         current = { info: p.info, from: t('card.fromPipette', { s: `${p.size}×${p.size}`, x: p.x, y: p.y }) };
         if (vs.view === 'highlight') vs.highlight = { ...vs.highlight, target: [...p.info.lab] as [number, number, number] };
-        if (pressed && !gesture) loupeAt = stagePoint(e);
+        if (pressed && !consumed) loupeAt = stagePoint(e);
         pickMs = [...pickMs.slice(-199), Math.round((performance.now() - t0) * 10) / 10];
       }
     } finally {
       picking = false;
       const n = nextPick;
       nextPick = null;
-      if (n && !gesture) void pipette(n);
+      if (n && !consumed) void pipette(n);
     }
   }
 
   function move(e: PointerEvent) {
-    if (tool === 'pipette' && e.buttons && !gesture) void pipette(e);
+    if (tool === 'pipette' && e.buttons && !consumed) void pipette(e);
   }
 
   function release() {
