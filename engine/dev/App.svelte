@@ -12,6 +12,8 @@
   import { nearestPaints, paintAlternatives, parseArtCatalogue, type ArtCatalogue, type ArtPaint, type ArtSet } from '../src/core/artpaints';
   import { alternatives, evenTones, GREY_SERIES, INK_BRANDS, inkById, inkRecipe, nearestInks } from '../src/core/pigments';
   import { HINTS } from './hints';
+  // The author's profile, a small link under the title. Empty url hides it.
+  const INSTAGRAM = { url: 'https://www.instagram.com/vladimir_vishar/', handle: '@vladimir_vishar' };
   import { i18n, LANGS, num, plural, setLang, t, type Key } from './i18n.svelte';
   import { DEFAULT_GRID, gridGeometry, type GridParams } from '../src/core/grid';
   import { askPersist, deleteProject, exportProjectFile, getBlob, importProjectFile, listProjects, renameProject, saveProject, saveView, storageInfo, type ProjectMeta, type StorageInfo } from './projects';
@@ -1042,7 +1044,10 @@
   <header class="top">
     <div class="brand">
       <img src="icon-192.png" alt="" width="28" height="28" />
-      <h1>Vishar Color Study</h1>
+      <div class="title">
+        <h1>Vishar Color Study</h1>
+        {#if INSTAGRAM.url}<a class="social" href={INSTAGRAM.url} target="_blank" rel="noopener noreferrer">{INSTAGRAM.handle}</a>{/if}
+      </div>
     </div>
     <div class="seg lang" role="group" aria-label={t('lang.label')}>
       {#each LANGS as [l, name, short]}
@@ -2099,6 +2104,9 @@
   .top { display: flex; align-items: center; gap: 8px; }
   .brand { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
   .brand img { border-radius: 7px; flex: none; }
+  .title { min-width: 0; display: flex; flex-direction: column; }
+  .social { font-size: 11px; line-height: 1.2; color: var(--muted); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .social:hover, .social:focus-visible { color: var(--accent); text-decoration: underline; }
   .brand h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 18px; }
   .lang button { font-size: 12px; padding: 4px 8px; }
   .round { width: 32px; height: 32px; border-radius: 50%; padding: 0; font-weight: 700; flex: none; }
