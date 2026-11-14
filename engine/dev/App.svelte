@@ -114,6 +114,91 @@
   // Stage 2: pipette, palette, colour card, compare, Highlight.
   let stageW = $state(0);
   let stageH = $state(0);
+
+  // Full screen: the stage covers the window; two fingers (or the wheel, or ± buttons) zoom
+  // and pan. One finger keeps its usual job (pipette, level, tile), so a tap still picks.
+  let full = $state(false);
+  let zoom = $state({ s: 1, x: 0, y: 0 });
+  const ZOOM_MAX = 8;
+  const touches = new Map<number, { x: number; y: number }>();
+  let gesture: { d: number; mx: number; my: number; z: { s: number; x: number; y: number } } | null = null;
+  // The first finger of a pinch lands alone and already picks: the pinch puts the pick back.
+  // The same for a Values level and a skin tile. A pinch consumes every finger in it: until
+  // all are lifted, nothing picks, and answers still in flight are dropped.
+  let beforePick: { picked: PickResult | null; current: { info: ColorInfo; from: string } | null; target: ViewState['highlight']['target']; level: number; skin: ViewState['tattoo']['skin'] } | null = null;
+  let consumed = false;
+  let pinches = 0;
+  function clampZoom(z: { s: number; x: number; y: number }) {
+    const s = Math.min(ZOOM_MAX, Math.max(1, z.s));
+    return { s, x: Math.min(0, Math.max(stageW - stageW * s, z.x)), y: Math.min(0, Math.max(stageH - stageH * s, z.y)) };
+  }
+  /** Zoom by k around a point of the stage (CSS px), keeping that point under the finger. */
+  function zoomAt(k: number, px = stageW / 2, py = stageH / 2) {
+    const z = zoom, s = Math.min(ZOOM_MAX, Math.max(1, z.s * k)), cx = (px - z.x) / z.s, cy = (py - z.y) / z.s;
+    zoom = clampZoom({ s, x: px - cx * s, y: py - cy * s });
+  }
+  function setFull(on: boolean) {
+    full = on;
+    zoom = { s: 1, x: 0, y: 0 };
+    touches.clear();
+    gesture = null;
+    consumed = false;
+    release();
+    document.body.classList.toggle('noscroll', on);
+  }
+  function stagePoint(e: PointerEvent | WheelEvent) {
+    const r = box.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+  function gestureStart() {
+    const [a, b] = [...touches.values()];
+    gesture = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, z: { ...zoom } };
+    consumed = true;
+    pinches++;
+    release();
+    if (beforePick) {
+      const b = beforePick;
+      ({ picked, current } = b);
+      if (vs.highlight.target !== b.target) vs.highlight = { ...vs.highlight, target: b.target };
+      if (vs.values.highlight !== b.level) vs.values.highlight = b.level;
+      if (vs.tattoo.skin !== b.skin) vs.tattoo.skin = b.skin;
+      beforePick = null;
+    }
+  }
+  function stageDown(e: PointerEvent) {
+    if (!full) return;
+    touches.set(e.pointerId, stagePoint(e));
+    if (touches.size === 1) beforePick = { picked, current, target: vs.highlight.target, level: vs.values.highlight, skin: vs.tattoo.skin };
+    if (touches.size === 2) gestureStart();
+  }
+  function stageMove(e: PointerEvent) {
+    if (!full || !touches.has(e.pointerId)) return;
+    touches.set(e.pointerId, stagePoint(e));
+    if (!gesture || touches.size < 2) return;
+    const [a, b] = [...touches.values()], g = gesture;
+    const s = Math.min(ZOOM_MAX, Math.max(1, g.z.s * Math.hypot(a.x - b.x, a.y - b.y) / g.d));
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, cx = (g.mx - g.z.x) / g.z.s, cy = (g.my - g.z.y) / g.z.s;
+    zoom = clampZoom({ s, x: mx - cx * s, y: my - cy * s });
+  }
+  function stageUp(e: PointerEvent) {
+    touches.delete(e.pointerId);
+    if (touches.size < 2) gesture = null;
+    if (touches.size === 2) gestureStart();
+    if (touches.size === 0) consumed = false;
+  }
+  function stageWheel(e: WheelEvent) {
+    if (!full) return;
+    e.preventDefault();
+    const p = stagePoint(e);
+    zoomAt(Math.exp(-e.deltaY * 0.002), p.x, p.y);
+  }
+  function fullKey(e: KeyboardEvent) {
+    if (!full) return;
+    if (e.key === 'Escape') setFull(false);
+    else if (e.key === '+' || e.key === '=') zoomAt(1.5);
+    else if (e.key === '-') zoomAt(1 / 1.5);
+    else if (e.key === '0') zoom = { s: 1, x: 0, y: 0 };
+  }
   // Page section: a view of the engine, or the palette (shown over the original).
   type Section = (typeof TABS)[number][0];
   let section = $state<Section>('original');
@@ -575,7 +660,7 @@
   }
 
   async function tap(e: PointerEvent) {
-    if (!engine) return;
+    if (!engine || consumed) return;
     // Тату → Кожа, all tones: a tap on a tile opens that tone.
     if (vs.view === 'tattoo' && vs.tattoo.tool === 'skin' && vs.tattoo.skin.show === 'all' && last) {
       const r = canvas.getBoundingClientRect();
@@ -591,8 +676,9 @@
       return;
     }
     if (tool !== 'level') return;
-    const r = canvas.getBoundingClientRect();
-    const lev = await engine.pick(e.clientX - r.left, e.clientY - r.top);
+    const r = canvas.getBoundingClientRect(), k = canvas.clientWidth / r.width;
+    const n = pinches, lev = await engine.pick((e.clientX - r.left) * k, (e.clientY - r.top) * k);
+    if (consumed || n !== pinches) return;
     vs.values.highlight = lev === vs.values.highlight ? -1 : lev;
   }
 
@@ -609,24 +695,24 @@
     const u = (cx / r.width - last.rect.x) / last.rect.w, v = (cy / r.height - last.rect.y) / last.rect.h;
     const t0 = performance.now();
     try {
-      const p = await engine.pickColor(u, v, sampleSize);
-      if (p) {
+      const n = pinches, p = await engine.pickColor(u, v, sampleSize);
+      if (p && !consumed && n === pinches) {
         picked = p;
         current = { info: p.info, from: t('card.fromPipette', { s: `${p.size}×${p.size}`, x: p.x, y: p.y }) };
         if (vs.view === 'highlight') vs.highlight = { ...vs.highlight, target: [...p.info.lab] as [number, number, number] };
-        if (pressed) loupeAt = { x: cx, y: cy };
+        if (pressed && !consumed) loupeAt = stagePoint(e);
         pickMs = [...pickMs.slice(-199), Math.round((performance.now() - t0) * 10) / 10];
       }
     } finally {
       picking = false;
       const n = nextPick;
       nextPick = null;
-      if (n) void pipette(n);
+      if (n && !consumed) void pipette(n);
     }
   }
 
   function move(e: PointerEvent) {
-    if (tool === 'pipette' && e.buttons) void pipette(e);
+    if (tool === 'pipette' && e.buttons && !consumed) void pipette(e);
   }
 
   function release() {
@@ -703,7 +789,7 @@
     const r = last.rect, n = swatches.length, sw = Math.min(40, (stageW - 16) / n), x0 = (stageW - sw * n) / 2;
     return swatches.map((s, i) => ({
       s, i,
-      mx: (r.x + s.marker.x * r.w) * stageW, my: (r.y + s.marker.y * r.h) * stageH,
+      mx: (r.x + s.marker.x * r.w) * stageW * zoom.s + zoom.x, my: (r.y + s.marker.y * r.h) * stageH * zoom.s + zoom.y,
       sx: x0 + i * sw, sw, sy: stageH - sw - 8,
     }));
   });
@@ -768,6 +854,7 @@
       open: opened,
       fullExport: fullLog ? { ...$state.snapshot(fullLog), blob: undefined, bytes: fullLog.blob.size } : null,
       view: $state.snapshot(vs),
+      viewer: { full, zoom: $state.snapshot(zoom), picked: picked ? { x: picked.x, y: picked.y, hex: picked.info.codes.HEX } : null },
       lastFrame: last ? { timings: last.timings, roundTripMs: last.roundTripMs, stats: last.stats } : null,
       slider: { frames: slider.n, maxMs: slider.max, p95Ms: p95(slider.samples), meanMs: slider.n ? Math.round((slider.sum / slider.n) * 10) / 10 : 0 },
       maxMainThreadStallMs: stall.max,
@@ -949,6 +1036,8 @@
 <input id="photo-input" class="vh" type="file" accept="image/*,.heic,.heif,.dng" onchange={onFile} />
 <input id="camera-input" class="vh" type="file" accept="image/*" capture="environment" onchange={onFile} />
 
+<svelte:window onkeydown={fullKey} />
+
 <main>
   <header class="top">
     <div class="brand">
@@ -1017,7 +1106,9 @@
   </details>
 
   <div class="pinned">
-  <div class="stage" bind:this={box} bind:clientWidth={stageW} bind:clientHeight={stageH}>
+  <div class="stage" class:full bind:this={box} bind:clientWidth={stageW} bind:clientHeight={stageH}
+    onpointerdowncapture={stageDown} onpointermovecapture={stageMove} onpointerupcapture={stageUp} onpointercancelcapture={stageUp} onwheel={stageWheel}>
+    <div class="zoom" style:transform={zoom.s === 1 ? undefined : `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.s})`}>
     <canvas bind:this={canvas} onpointerdown={tap} onpointermove={move} onpointerup={release} onpointercancel={release}
       aria-label={opened ? `${t(TABS.find(([v]) => v === section)?.[1] ?? 'tab.original')}: ${opened.label}` : t('stage.empty')}></canvas>
     {#if gridLines}
@@ -1026,6 +1117,7 @@
         {#each gridLines.main as l}<line x1={l[0]} y1={l[1]} x2={l[2]} y2={l[3]} style:stroke={gridStroke} style:stroke-width="1.25px" stroke-opacity={grid.opacity} />{/each}
       </svg>
     {/if}
+    </div>
     {#if overlay.length}
       <svg class="overlay" width={stageW} height={stageH}>
         {#each overlay as m}
@@ -1044,6 +1136,19 @@
         <canvas bind:this={lcanvas}></canvas>
         <span style="background: {picked.info.codes.HEX}"></span>
       </div>
+    {/if}
+    {#if opened && !full}
+      <button class="fsbtn" onclick={() => setFull(true)} aria-label={t('stage.fullscreen')} title={t('stage.fullscreen')}>⛶</button>
+    {/if}
+    {#if full}
+      <div class="fsbar">
+        <span class="fsname">{t(TABS.find(([v]) => v === section)?.[1] ?? 'tab.original')}{zoom.s > 1.01 ? ` · ${num(zoom.s, 1)}×` : ''}</span>
+        <button onclick={() => zoomAt(1 / 1.5)} disabled={zoom.s <= 1} aria-label={t('stage.zoomOut')} title={t('stage.zoomOut')}>−</button>
+        <button onclick={() => zoomAt(1.5)} disabled={zoom.s >= ZOOM_MAX} aria-label={t('stage.zoomIn')} title={t('stage.zoomIn')}>+</button>
+        <button onclick={() => (zoom = { s: 1, x: 0, y: 0 })} disabled={zoom.s === 1}>{t('stage.zoomFit')}</button>
+        <button class="primary" onclick={() => setFull(false)} aria-label={t('stage.exitFull')} title={t('stage.exitFull')}>✕</button>
+      </div>
+      <p class="fshint">{t('stage.zoomHint')}</p>
     {/if}
     {#if !opened}<div class="cover"></div>{/if}
     {#if !opened && !busy}<p class="hint">{engine ? t('stage.empty') : error ? '' : t('stage.starting')}</p>{/if}
@@ -1878,6 +1983,25 @@
     touch-action: manipulation;
   }
   .stage canvas { width: 100%; height: 100%; display: block; }
+  .zoom { position: absolute; inset: 0; transform-origin: 0 0; }
+  .stage.full {
+    position: fixed; inset: 0; z-index: 40; height: auto; border-radius: 0;
+    touch-action: none;
+  }
+  .fsbtn {
+    position: absolute; top: 8px; right: 8px; z-index: 2;
+    width: 36px; height: 36px; padding: 0; font-size: 18px; line-height: 1;
+    background: rgba(0, 0, 0, 0.45); color: #fff; border-color: rgba(255, 255, 255, 0.35);
+  }
+  .fsbar {
+    position: absolute; z-index: 2; display: flex; align-items: center; gap: 6px;
+    top: calc(8px + env(safe-area-inset-top)); left: calc(8px + env(safe-area-inset-left)); right: calc(8px + env(safe-area-inset-right));
+  }
+  .fsbar button { min-width: 40px; height: 40px; background: rgba(0, 0, 0, 0.5); color: #fff; border-color: rgba(255, 255, 255, 0.35); }
+  .fsbar button.primary { background: var(--accent); border-color: var(--accent); }
+  .fsname { flex: 1; min-width: 0; color: #fff; font-weight: 600; text-shadow: 0 1px 2px #000; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fshint { position: absolute; z-index: 2; left: 50%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 24px); bottom: calc(10px + env(safe-area-inset-bottom)); margin: 0; padding: 4px 10px; border-radius: 12px; text-align: center; font-size: 12px; color: #fff; background: rgba(0, 0, 0, 0.55); pointer-events: none; }
+  :global(body.noscroll) { overflow: hidden; }
   .hint { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: var(--muted); pointer-events: none; }
   .project { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
   .project img, .project .nothumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; background: var(--line, #ddd); flex: none; }
