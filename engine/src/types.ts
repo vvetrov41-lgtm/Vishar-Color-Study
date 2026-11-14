@@ -1,3 +1,4 @@
+import type { GridParams } from './core/grid';
 import type { ColorInfo } from './core/colorinfo';
 import type { ImageInfo } from './core/imageinfo';
 import type { Palette } from './core/palette';
@@ -83,6 +84,29 @@ export interface SvgExport {
   loops: number;
   points: number;
   ms: number;
+}
+
+export interface FullExportOptions {
+  /** Tile side, px; smaller on retry after a memory error. */
+  tile?: number;
+  /** Memory budget for the full frame plus one band, MB. */
+  budgetMB?: number;
+  /** Drawing grid burnt into the exported image. */
+  grid?: GridParams | null;
+}
+
+export interface FullExport {
+  blob: Blob;
+  width: number;
+  height: number;
+  /** Source size; width × height is smaller when the ladder had to step down. */
+  sourceWidth: number;
+  sourceHeight: number;
+  tile: number;
+  tiles: number;
+  /** Why the export is smaller than the source, empty when it is not. */
+  notes: string[];
+  ms: { decode: number; render: number; encode: number; total: number };
 }
 
 export interface StencilExport {

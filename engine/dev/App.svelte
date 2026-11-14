@@ -1,6 +1,6 @@
 <script lang="ts">
-  // Debug page for stages 1–4: not the Color Study interface. It drives the engine,
-  // shows the numbers behind each view and checks the stage acceptance targets on a device.
+  // Vishar Color Study: the working prototype. The engine runs in a Worker; this page holds the
+  // interface in three languages (RU/EN/ES). The stage diagnostics stay behind «Диагностика».
   import { onMount } from 'svelte';
   import { EngineClient } from '../src/client';
   import { labToSrgb } from '../src/core/color';
@@ -12,19 +12,24 @@
   import { nearestPaints, paintAlternatives, parseArtCatalogue, type ArtCatalogue, type ArtPaint, type ArtSet } from '../src/core/artpaints';
   import { alternatives, evenTones, GREY_SERIES, INK_BRANDS, inkById, inkRecipe, nearestInks } from '../src/core/pigments';
   import { HINTS } from './hints';
+  import { i18n, LANGS, num, plural, setLang, t, type Key } from './i18n.svelte';
+  import { DEFAULT_GRID, gridGeometry, type GridParams } from '../src/core/grid';
   import { askPersist, deleteProject, exportProjectFile, getBlob, importProjectFile, listProjects, renameProject, saveProject, saveView, storageInfo, type ProjectMeta, type StorageInfo } from './projects';
-  import type { OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
+  import type { FullExport, OpenResult, PaletteResult, ParityReport, PickResult, SvgExport, ViewResult } from '../src/types';
 
   const VERSION = __ENGINE_VERSION__;
-  const SAMPLES: Array<[string, string]> = [
-    ['Натюрморт 1K', 'fixtures/stilllife_1k.png'],
-    ['Пейзаж 1K', 'fixtures/landscape_1k.png'],
-    ['Флэш 1K', 'fixtures/flash_1k.png'],
-    ['Портрет 1K', 'fixtures/portrait_1k.png'],
-    ['12 МП JPEG', 'samples/synth_12mp.jpg'],
-    ['12 МП HEIC', 'samples/synth_12mp.heic'],
-    ['48 МП JPEG', 'samples/synth_48mp.jpg'],
-    ['48 МП HEIC', 'samples/synth_48mp.heic'],
+  // Built-in examples for everyone; the 12/48 MP synthetic photos only with diagnostics on.
+  const SAMPLES: Array<[Key, string]> = [
+    ['sample.stilllife', 'fixtures/stilllife_1k.png'],
+    ['sample.landscape', 'fixtures/landscape_1k.png'],
+    ['sample.flash', 'fixtures/flash_1k.png'],
+    ['sample.portrait', 'fixtures/portrait_1k.png'],
+  ];
+  const BIG_SAMPLES: Array<[string, string]> = [
+    ['12 MP JPEG', 'samples/synth_12mp.jpg'],
+    ['12 MP HEIC', 'samples/synth_12mp.heic'],
+    ['48 MP JPEG', 'samples/synth_48mp.jpg'],
+    ['48 MP HEIC', 'samples/synth_48mp.heic'],
   ];
   const FIXTURES = Object.fromEntries(['stilllife', 'landscape', 'flash', 'portrait'].map((n) => [n, new URL(`fixtures/${n}_1k.png`, location.href).href]));
   // Stage 1 targets from IMPLEMENTATION_PLAN, section 6.
@@ -33,15 +38,61 @@
   const TARGET2 = { paletteMs: 500, highlightMs: 50, markerDE: 2 };
   // Stage 3 targets: Clustering ≤ 1 s on the working copy, Graph ≤ 3 s with a progress indicator.
   const TARGET3 = { clusteringMs: 1000, graphMs: 3000, drawSliderMs: 50 };
-  const TABS = [['original', 'Оригинал'], ['palette', 'Палитра'], ['values', 'Values'], ['notan', 'Notan'], ['temperature', 'Temp'], ['highlight', 'Highlight'], ['simplify', 'Simplify'], ['drawing', 'Drawing'], ['tattoo', 'Тату']] as const;
-  const TOOLS: Array<[TattooTool, string]> = [['design', 'Эскиз'], ['contrast', 'Контраст'], ['pigments', 'Пигменты'], ['lines', 'Линии'], ['distance', 'Расстояние'], ['spread', 'Расплывание'], ['skin', 'Кожа']];
+  const TABS = [['original', 'tab.original'], ['palette', 'tab.palette'], ['values', 'tab.values'], ['notan', 'tab.notan'], ['temperature', 'tab.temperature'], ['highlight', 'tab.highlight'], ['simplify', 'tab.simplify'], ['drawing', 'tab.drawing'], ['tattoo', 'tab.tattoo']] as const satisfies ReadonlyArray<readonly [string, Key]>;
+  const TOOLS: Array<[TattooTool, Key]> = [['design', 'tool.design'], ['contrast', 'tool.contrast'], ['pigments', 'tool.pigments'], ['lines', 'tool.lines'], ['distance', 'tool.distance'], ['spread', 'tool.spread'], ['skin', 'tool.skin']];
   const SKIN_NAMES = ['I', 'II', 'III', 'IV', 'V', 'VI'];
-  const toneName = (k: number) => (k === OWN_TONE ? 'свой тон' : `тон ${SKIN_NAMES[k]}`);
+  const toneName = (k: number) => (k === OWN_TONE ? t('skin.ownTone') : t('skin.toneN', { n: SKIN_NAMES[k] }));
   // Calibration sliders of the skin tool: key, label, min, max, unit.
-  const CAL: Array<[keyof Calibration, string, number, number, string]> = [
-    ['brightness', 'Яркость', -40, 40, ''], ['contrast', 'Контраст', 50, 200, '%'], ['shadows', 'Тени', -40, 40, ''],
-    ['highlights', 'Света', -40, 40, ''], ['saturation', 'Насыщенность', 0, 200, '%'], ['warmth', 'Тепло', -30, 30, ''],
+  const CAL: Array<[keyof Calibration, Key, number, number, string]> = [
+    ['brightness', 'cal.brightness', -40, 40, ''], ['contrast', 'cal.contrast', 50, 200, '%'], ['shadows', 'cal.shadows', -40, 40, ''],
+    ['highlights', 'cal.highlights', -40, 40, ''], ['saturation', 'cal.saturation', 0, 200, '%'], ['warmth', 'cal.warmth', -30, 30, ''],
   ];
+  const ART_TYPES: Array<[string, Key]> = [['acrylic', 'art.acrylic'], ['oil', 'art.oil'], ['water-mixable-oil', 'art.wmOil'], ['watercolor', 'art.watercolor'], ['gouache', 'art.gouache'], ['acrylic-gouache', 'art.acrylicGouache'], ['soft-pastel', 'art.softPastel'], ['alcohol-marker', 'art.alcoholMarker'], ['colored-pencil', 'art.coloredPencil']];
+  const TEMP_KEY: Record<string, Key> = { 'тёплый': 'temp.warm', 'холодный': 'temp.cool', 'нейтральный': 'temp.neutral' };
+  const WHY_KEY: Record<string, Key> = { 'тот же состав': 'art.samePigments', 'близкий цвет': 'art.closeColor' };
+
+  /** Plain colour name in the interface language. */
+  function colorLabel(c: ColorInfo): string {
+    const p = c.nameParts;
+    return t('color.name', { base: t(`hue.${p.base}` as Key), tone: p.tone ? t(`hueTone.${p.tone}` as Key) : '', muted: p.muted ? t('hue.muted') : '' })
+      .replace(/\s+/g, ' ').trim();
+  }
+
+  // Engine and storage errors come in Russian from the core: known ones are shown translated.
+  const ERRORS: Array<[RegExp, Key]> = [
+    [/WebGL-контекст потерян/, 'err.glLost'], [/WebGL2 недоступен/, 'err.noWebgl'], [/не удалось декодировать/, 'err.decode'],
+    [/нечего экспортировать/, 'err.nothing'], [/не хватило памяти/, 'err.memory'], [/SVG есть только/, 'err.svgOnly'],
+    [/прозрачный PNG есть только/, 'err.svgOnly'], [/трафарет делается/, 'err.stencilTab'], [/в полном размере экспортируются/, 'err.fullOnly'],
+    [/это не файл проекта/, 'err.notProject'], [/файл проекта обрезан/, 'err.truncated'], [/проект не найден|нет файла проекта/, 'err.projectMissing'],
+    [/в проекте нет фото/, 'err.projectEmpty'], [/QuotaExceeded|quota/i, 'err.quota'],
+  ];
+  function errText(e: unknown): string {
+    const m = String((e as Error)?.message ?? e);
+    const hit = ERRORS.find(([re]) => re.test(m));
+    return hit ? t(hit[1]) : m;
+  }
+
+  // Diagnostics (stage targets, GPU/CPU parity, JSON report) are for checks on a device, not for
+  // everyday work: hidden unless turned on in the footer or with ?debug=1.
+  const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
+  const lsGet = (k: string) => { try { return localStorage.getItem(k); } catch { return null; } };
+  const lsSet = (k: string, v: string | null) => { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch {} };
+  let debug = $state(params.get('debug') === '1' || lsGet('vishar.debug') === '1');
+  function toggleDebug() { debug = !debug; lsSet('vishar.debug', debug ? '1' : null); }
+
+  // First-run introduction: three short steps, shown once.
+  let intro = $state(params.get('intro') !== '0' && lsGet('vishar.intro') !== '1');
+  let introStep = $state(0);
+  function closeIntro() { intro = false; introStep = 0; lsSet('vishar.intro', '1'); }
+
+  // Drawing grid: on screen over the photo and, when asked, burnt into the exported PNG.
+  type GridColor = 'white' | 'black' | 'accent';
+  const GRID_RGB: Record<GridColor, [number, number, number]> = { white: [255, 255, 255], black: [0, 0, 0], accent: [234, 88, 12] };
+  type GridUi = Omit<GridParams, 'color' | 'widthCm'> & { on: boolean; color: GridColor; inExport: boolean };
+  const GRID0: GridUi = { ...DEFAULT_GRID, on: false, color: 'white', inExport: true };
+  let grid = $state<GridUi>((() => { try { return { ...GRID0, ...JSON.parse(lsGet('vishar.grid') ?? '{}'), on: false }; } catch { return { ...GRID0 }; } })());
+  let gridOpen = $state(false);
+  $effect(() => { lsSet('vishar.grid', JSON.stringify($state.snapshot(grid))); });
   const SIZES = [1, 3, 5, 11];
   const KINDS = [['dominant', 'Dominant'], ['range', 'Range'], ['accents', 'Accents']] as const;
   type Kind = (typeof KINDS)[number][0];
@@ -78,16 +129,27 @@
   // section works on (at working-copy resolution), so e.g. pigments follow a calibrated version.
   let chain: Array<{ label: string; blob: Blob }> = $state([]);
 
+  /** Step names are stored as keys (`notan`, `tattoo:skin`) and shown in the current language. */
   function stepName(): string {
-    const tab = TABS.find(([v]) => v === section)?.[1] ?? section;
-    return section === 'tattoo' ? `${tab}: ${TOOLS.find(([k]) => k === vs.tattoo.tool)?.[1] ?? vs.tattoo.tool}` : tab;
+    const v = section === 'palette' ? 'original' : vs.view;
+    return v === 'tattoo' ? `tattoo:${vs.tattoo.tool}` : v;
+  }
+  function stepLabel(k: string): string {
+    if (k === 'original' || k === 'Оригинал') return t('tab.original');
+    const tab = TABS.find(([v]) => v === k);
+    if (tab) return t(tab[1]);
+    if (k.startsWith('tattoo:')) {
+      const tool = TOOLS.find(([v]) => v === k.slice(7));
+      return `${t('tab.tattoo')}: ${tool ? t(tool[1]) : k.slice(7)}`;
+    }
+    return k; // projects saved before the translation keep their Russian labels
   }
 
   /** Takes what is on screen into work and goes back to «Оригинал» showing it. */
   async function commit() {
     if (!engine || !opened) return;
     try {
-      busy = 'Беру результат в работу…';
+      busy = t('busy.commit');
       const blob = await engine.exportWork(), name = stepName();
       vs.tattoo.pigments.focus = -1;
       vs.tattoo.tool = 'design';
@@ -97,7 +159,7 @@
       openSection('original');
       void saveChain();
     } catch (e) {
-      error = String((e as Error)?.message ?? e);
+      error = errText(e);
       busy = '';
     }
   }
@@ -128,14 +190,14 @@
 
   const thumbs = new WeakMap<Blob, string>();
   const thumbUrl = (b: Blob) => { let u = thumbs.get(b); if (!u) thumbs.set(b, (u = URL.createObjectURL(b))); return u; };
-  const stepsWord = (n: number) => (n % 10 === 1 && n % 100 !== 11 ? 'шаг' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'шага' : 'шагов');
+  const stepsWord = (n: number) => plural(n, 'steps');
 
   async function refreshProjects() {
     try {
       projects = await listProjects();
       storage = await storageInfo();
     } catch (e) {
-      projectMsg = `Хранилище недоступно: ${(e as Error).message}`;
+      projectMsg = t('proj.storageError', { e: errText(e) });
     }
   }
 
@@ -148,24 +210,24 @@
 
   async function newProject() {
     if (!opened || !chain.length) return;
-    busy = 'Сохраняю проект…';
+    busy = t('busy.saveProject');
     try {
       // Asked once, on the first save: without it Safari may clear the data after 7 days unused.
       if (storage && !storage.persisted) await askPersist();
-      const name = opened.label.split('/').pop()!.replace(/\.[a-z0-9]+$/i, '') || 'Проект';
+      const name = opened.label.split('/').pop()!.replace(/\.[a-z0-9]+$/i, '') || t('proj.defaultName');
       const m = await saveProject({ name, chain: $state.snapshot(chain) as typeof chain, view: $state.snapshot(vs) });
       project = { id: m.id, name: m.name };
-      projectMsg = `Сохранён «${m.name}». Дальше изменения сохраняются сами.`;
+      projectMsg = t('proj.saved', { name: m.name });
       await refreshProjects();
     } catch (e) {
-      projectMsg = `Не сохранилось: ${(e as Error).message}`;
+      projectMsg = t('proj.saveFailed', { e: errText(e) });
     } finally {
       busy = '';
     }
   }
 
   async function openProject(p: ProjectMeta) {
-    busy = `Открываю проект ${p.name}…`;
+    busy = t('busy.openProject', { name: p.name });
     try {
       const steps = await Promise.all(p.steps.map(async (s) => ({ label: s.label, blob: await getBlob(s.key) })));
       if (!steps.length) throw new Error('в проекте нет фото');
@@ -179,7 +241,7 @@
       await apply();
       projectMsg = '';
     } catch (e) {
-      projectMsg = `Не открылся: ${(e as Error).message}`;
+      projectMsg = t('proj.openFailed', { e: errText(e) });
     } finally {
       loadingProject = false;
       busy = '';
@@ -187,7 +249,7 @@
   }
 
   async function removeProject(p: ProjectMeta) {
-    if (!confirm(`Удалить проект «${p.name}» с устройства?`)) return;
+    if (!confirm(t('proj.confirmDelete', { name: p.name }))) return;
     await deleteProject(p.id);
     if (project?.id === p.id) project = null;
     await refreshProjects();
@@ -213,7 +275,7 @@
       await refreshProjects();
       await openProject(m);
     } catch (err) {
-      projectMsg = `Не импортировался: ${(err as Error).message}`;
+      projectMsg = t('proj.importFailed', { e: errText(err) });
     }
   }
 
@@ -271,7 +333,7 @@
       if (!res.ok) throw new Error(`${res.status}`);
       artCat = parseArtCatalogue(await res.json());
     } catch (e) {
-      artErr = `Каталог красок не загрузился: ${(e as Error).message}`;
+      artErr = t('art.loadFailed', { e: errText(e) });
     }
   }
   const artBrands = $derived(artCat && artSet.type ? [...new Set(artCat.paints.filter((p) => p.type === artSet.type).map((p) => p.brand))].sort() : []);
@@ -360,6 +422,9 @@
           stencil: async () => { const r = await engine!.exportStencil(); return { pageMm: r.pageMm, designMm: r.designMm, ms: r.ms, bytes: r.pdf.length, head: new TextDecoder().decode(r.pdf.subarray(0, 8)) }; },
           svg: async () => { const s = await engine!.exportSvg(); return { loops: s.loops, points: s.points, ms: s.ms, bytes: s.svg.length, head: s.svg.slice(0, 200) }; },
           report,
+          lang: (l: 'ru' | 'en' | 'es') => setLang(l),
+          intro: (on: boolean) => { if (on) { intro = true; introStep = 0; } else closeIntro(); },
+          grid: (patch: Partial<GridUi>) => { Object.assign(grid, patch); return $state.snapshot(grid); },
           projects: {
             save: async () => { await newProject(); return { project: $state.snapshot(project), msg: projectMsg }; },
             list: async () => { await refreshProjects(); return { list: $state.snapshot(projects).map((p) => ({ id: p.id, name: p.name, steps: p.steps.length, bytes: p.bytes })), storage: $state.snapshot(storage) }; },
@@ -369,18 +434,20 @@
             importBytes: async (b: number[]) => { const m = await importProjectFile(new Blob([new Uint8Array(b)])); await refreshProjects(); return m.name; },
             remove: async (k: number) => { await deleteProject(projects[k].id); await refreshProjects(); return projects.length; },
           },
+          full: async (opts?: { tile?: number; budgetMB?: number; grid?: boolean }) => { const r = await engine!.exportFull({ ...opts, grid: opts?.grid ? exportGrid() : null }); return { ...r, blob: undefined, bytes: Array.from(new Uint8Array(await r.blob.arrayBuffer())) }; },
+          work: async (withGrid = false) => Array.from(new Uint8Array(await (await engine!.exportWork(withGrid ? exportGrid() : null)).arrayBuffer())),
           sw: () => $state.snapshot(swInfo),
           net: () => { auditNetwork(); return $state.snapshot(net); },
         },
       });
-    }).catch((e) => (error = String(e?.message ?? e)));
+    }).catch((e) => (error = errText(e)));
   });
 
   /** keep: re-open of the same photo after the selftest, measurements made on it stay. */
   async function openBlob(blob: Blob, label: string, keep = false) {
     if (!engine) return;
     error = '';
-    busy = `Открываю ${label}…`;
+    busy = t('busy.opening', { name: label });
     lastBlob = { blob, label };
     if (!keep) vs.tattoo.tool = 'design';
     if (!keep && !loadingProject) project = null;
@@ -396,7 +463,7 @@
       logCompute(v);
       drawHist();
       if (keep) return;
-      chain = [{ label: 'Оригинал', blob }];
+      chain = [{ label: 'original', blob }];
       slider = { n: 0, max: 0, sum: 0, samples: [] };
       hlSlider = { n: 0, max: 0, samples: [] };
       palette = null;
@@ -409,7 +476,7 @@
       tattooLog = {};
       stencilInfo = null;
     } catch (e) {
-      error = String((e as Error)?.message ?? e);
+      error = errText(e);
     } finally {
       busy = '';
     }
@@ -426,20 +493,22 @@
   }
 
   async function openSample(url: string, label: string) {
-    busy = `Скачиваю ${label}…`;
+    busy = t('busy.loading', { name: label });
     try {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`${res.status}`);
       await openBlob(await res.blob(), label);
     } catch (e) {
-      error = `${label}: ${(e as Error).message}`;
+      error = `${label}: ${errText(e)}`;
       busy = '';
     }
   }
 
   function onFile(e: Event) {
-    const f = (e.target as HTMLInputElement).files?.[0];
+    const input = e.target as HTMLInputElement, f = input.files?.[0];
     if (f) void openBlob(f, f.name);
+    // The same file again must still fire «change».
+    input.value = '';
   }
 
   async function apply(fromSlider = false) {
@@ -543,7 +612,7 @@
       const p = await engine.pickColor(u, v, sampleSize);
       if (p) {
         picked = p;
-        current = { info: p.info, from: `пипетка ${p.size}×${p.size} в (${p.x}, ${p.y})` };
+        current = { info: p.info, from: t('card.fromPipette', { s: `${p.size}×${p.size}`, x: p.x, y: p.y }) };
         if (vs.view === 'highlight') vs.highlight = { ...vs.highlight, target: [...p.info.lab] as [number, number, number] };
         if (pressed) loupeAt = { x: cx, y: cy };
         pickMs = [...pickMs.slice(-199), Math.round((performance.now() - t0) * 10) / 10];
@@ -591,7 +660,7 @@
 
   async function runPalette() {
     if (!engine || !opened) return;
-    busy = 'Извлекаю палитру…';
+    busy = t('busy.palette');
     try {
       palette = await engine.palette($state.snapshot(pparams));
       // Marker check: tap every marker with its pipette size, compare with the swatch.
@@ -604,14 +673,14 @@
       }
       markerCheck = { maxDE: Math.round(maxDE * 100) / 100, n };
     } catch (e) {
-      error = String((e as Error)?.message ?? e);
+      error = errText(e);
     } finally {
       busy = '';
     }
   }
 
   function selectSwatch(s: Swatch, label: string) {
-    current = { info: colorInfo(s.rgb), from: `${label}, доля ${(s.share * 100).toFixed(1)}%, маркер ${s.marker.size} px` };
+    current = { info: colorInfo(s.rgb), from: t('card.fromSwatch', { label, share: num(s.share * 100), size: s.marker.size }) };
   }
 
   function findOnPhoto(info: ColorInfo) {
@@ -669,7 +738,7 @@
 
   async function runSelftest() {
     if (!engine) return;
-    busy = 'Сверяю GPU с CPU-эталоном на 4 фото…';
+    busy = t('busy.selftest');
     error = '';
     try {
       const before = opened;
@@ -681,7 +750,7 @@
       const now = opened as typeof before;
       if (now && before) opened = { ...now, firstFrameMs: before.firstFrameMs, stallMs: before.stallMs };
     } catch (e) {
-      error = String((e as Error)?.message ?? e);
+      error = errText(e);
     } finally {
       busy = '';
     }
@@ -697,6 +766,7 @@
       standalone: matchMedia('(display-mode: standalone)').matches,
       caps: engine?.caps,
       open: opened,
+      fullExport: fullLog ? { ...$state.snapshot(fullLog), blob: undefined, bytes: fullLog.blob.size } : null,
       view: $state.snapshot(vs),
       lastFrame: last ? { timings: last.timings, roundTripMs: last.roundTripMs, stats: last.stats } : null,
       slider: { frames: slider.n, maxMs: slider.max, p95Ms: p95(slider.samples), meanMs: slider.n ? Math.round((slider.sum / slider.n) * 10) / 10 : 0 },
@@ -736,9 +806,9 @@
     const text = JSON.stringify(report(), null, 1);
     try {
       await navigator.clipboard.writeText(text);
-      copied = 'Скопировано';
+      copied = t('common.copied');
     } catch {
-      copied = 'Не удалось скопировать';
+      copied = t('common.copyFailed');
     }
     setTimeout(() => (copied = ''), 2000);
   }
@@ -778,7 +848,7 @@
       svgInfo = { loops: s.loops, points: s.points, ms: s.ms, bytes: blob.size };
       await shareFile(blob, `vishar-${vs.drawing.mode}.svg`);
     } catch (e) {
-      error = String((e as Error)?.message ?? e);
+      error = errText(e);
     }
   }
 
@@ -794,7 +864,7 @@
       stencilInfo = { pageMm: s.pageMm, designMm: s.designMm, ms: s.ms, bytes: blob.size };
       await shareFile(blob, `vishar-stencil-${vs.tattoo.widthCm}cm${vs.tattoo.lines.mirror ? '-mirror' : ''}.pdf`);
     } catch (e) {
-      error = String((e as Error)?.message ?? e);
+      error = errText(e);
     }
   }
 
@@ -803,7 +873,49 @@
     try {
       await shareFile(await engine.exportCalibrated(), `vishar-skin-${vs.tattoo.skin.tone === OWN_TONE ? 'own' : SKIN_NAMES[vs.tattoo.skin.tone]}.png`);
     } catch (e) {
-      error = String((e as Error)?.message ?? e);
+      error = errText(e);
+    }
+  }
+
+  // Export of the current view: GPU views at the source's full size (tiled), the rest at work size.
+  let fullInfo = $state('');
+  let fullLog = $state<FullExport | null>(null);
+  const FULL_VIEWS = ['original', 'values', 'notan', 'temperature', 'highlight'];
+  async function exportView() {
+    if (!engine || !opened) return;
+    error = ''; fullInfo = '';
+    const name = `vishar-${section === 'palette' ? 'original' : section}${section === 'tattoo' ? '-' + vs.tattoo.tool : ''}${exportGrid() ? '-grid' : ''}`;
+    const g = exportGrid();
+    try {
+      if (!FULL_VIEWS.includes(vs.view)) {
+        busy = t('busy.png');
+        await shareFile(await engine.exportWork(g), `${name}.png`);
+        fullInfo = t('export.workSize', { w: last?.work?.width ?? '', h: last?.work?.height ?? '' });
+        return;
+      }
+      busy = t('busy.fullExport');
+      let r: FullExport;
+      try {
+        r = await engine.exportFull({ grid: g });
+      } catch (e) {
+        // A tile too big for the GPU or memory: once more with smaller tiles.
+        busy = t('busy.smallerTiles');
+        r = await engine.exportFull({ tile: 1024, grid: g });
+        r.notes.push(`тайлы 2048 не прошли: ${(e as Error).message}`);
+      }
+      fullLog = r;
+      await shareFile(r.blob, `${name}-${r.width}x${r.height}.png`);
+      const reduced = r.width !== r.sourceWidth || r.height !== r.sourceHeight;
+      fullInfo = [
+        t('export.full', { w: r.width, h: r.height, mb: num(r.blob.size / 1048576), s: num(r.ms.total / 1000) }),
+        reduced ? t('export.reduced', { w: r.sourceWidth, h: r.sourceHeight }) : '',
+        chain.length > 1 ? t('export.chainNote') : '',
+      ].filter(Boolean).join(' · ');
+    } catch (e) {
+      error = t('export.failed', { e: errText(e) });
+    } finally {
+      busy = '';
+      progress = 0;
     }
   }
 
@@ -817,53 +929,103 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   }
 
+  const gridParams = $derived<GridParams>({ ...grid, color: GRID_RGB[grid.color], widthCm: vs.tattoo.widthCm });
+  /** The grid for an export, or null when it is off or kept to the screen. */
+  const exportGrid = () => (grid.on && grid.inExport ? $state.snapshot(gridParams) as GridParams : null);
+  const hints = $derived(HINTS[i18n.lang]);
+  const gridStroke = $derived(`rgb(${GRID_RGB[grid.color].join(',')})`);
+  /** Grid lines in stage CSS px, over the image rectangle of the current frame. */
+  const gridLines = $derived.by(() => {
+    if (!grid.on || !last || !opened || !stageW) return null;
+    const r = last.rect, g = gridGeometry(gridParams, last.work.width, last.work.height);
+    const px = (s: [number, number, number, number]) => [(r.x + s[0] * r.w) * stageW, (r.y + s[1] * r.h) * stageH, (r.x + s[2] * r.w) * stageW, (r.y + s[3] * r.h) * stageH];
+    return { main: g.main.map(px), sub: g.sub.map(px) };
+  });
+
   const ok = (pass: boolean) => (pass ? 'pass' : 'fail');
 </script>
 
-<main>
-  <header>
-    <h1>Vishar Engine · Stage 4</h1>
-    <p class="sub">Отладочная страница ядра, не интерфейс приложения · {VERSION}</p>
-  </header>
+<!-- One photo input for every «open» button, first in the page: scripts and the camera share it. -->
+<input id="photo-input" class="vh" type="file" accept="image/*,.heic,.heif,.dng" onchange={onFile} />
+<input id="camera-input" class="vh" type="file" accept="image/*" capture="environment" onchange={onFile} />
 
-  <section class="card">
-    <label class="file">
-      Открыть своё фото
-      <input type="file" accept="image/*,.heic,.heif" onchange={onFile} />
-    </label>
-    <div class="chips">
-      {#each SAMPLES as [label, url]}
-        <button class="chip" onclick={() => openSample(url, label)} disabled={!engine || !!busy}>{label}</button>
+<main>
+  <header class="top">
+    <div class="brand">
+      <img src="icon-192.png" alt="" width="28" height="28" />
+      <h1>Vishar Color Study</h1>
+    </div>
+    <div class="seg lang" role="group" aria-label={t('lang.label')}>
+      {#each LANGS as [l, name, short]}
+        <button class:active={i18n.lang === l} aria-pressed={i18n.lang === l} title={name} lang={l} onclick={() => setLang(l)}>{short}</button>
       {/each}
     </div>
-  </section>
+    <button class="round" onclick={() => { intro = true; introStep = 0; }} aria-label={t('intro.open')}>?</button>
+  </header>
+
+  {#if !opened}
+    <section class="card start">
+      <h2>{t('start.title')}</h2>
+      <p class="muted">{t('start.lead')}</p>
+      <div class="row">
+        <label class="btn primary" for="photo-input">{t('start.open')}</label>
+        <label class="btn" for="camera-input">{t('start.camera')}</label>
+      </div>
+      <p class="muted">{t('start.private')}</p>
+      <p class="label">{t('start.samples')}</p>
+      <div class="chips">
+        {#each SAMPLES as [key, url]}
+          <button class="chip" onclick={() => openSample(url, t(key))} disabled={!engine || !!busy}>{t(key)}</button>
+        {/each}
+        {#if debug}
+          {#each BIG_SAMPLES as [label, url]}
+            <button class="chip" onclick={() => openSample(url, label)} disabled={!engine || !!busy}>{label}</button>
+          {/each}
+        {/if}
+      </div>
+    </section>
+  {:else}
+    <div class="openbar">
+      <span class="muted name">{project ? project.name : opened.label}</span>
+      <label class="btn small" for="photo-input">{t('start.newPhoto')}</label>
+      <label class="btn small" for="camera-input" aria-label={t('start.camera')}>📷</label>
+    </div>
+  {/if}
 
   <details class="card">
-    <summary>Проекты{project ? `: ${project.name}` : ''} {@render i('projects')}</summary>
+    <summary>{t('proj.title')}{project ? `: ${project.name}` : ''} {@render i('projects')}</summary>
     {#if project}
-      <label class="row"><span>Название</span><input type="text" value={project.name} onchange={(e) => renameCurrent((e.currentTarget as HTMLInputElement).value)} /></label>
-      <p class="muted">Сохраняется само: шаги «Взять в работу» и настройки разделов.</p>
+      <label class="row"><span>{t('proj.name')}</span><input type="text" value={project.name} onchange={(e) => renameCurrent((e.currentTarget as HTMLInputElement).value)} /></label>
+      <p class="muted">{t('proj.autosave')}</p>
     {:else}
-      <div class="row"><button class="primary" onclick={newProject} disabled={!opened || !!busy}>Сохранить как проект</button></div>
+      <div class="row"><button class="primary" onclick={newProject} disabled={!opened || !!busy}>{t('proj.save')}</button></div>
+      {#if !opened}<p class="muted">{t('proj.openFirst')}</p>{/if}
     {/if}
     {#if projectMsg}<p class="muted">{projectMsg}</p>{/if}
     {#each projects as p (p.id)}
       <div class="project" class:on={project?.id === p.id}>
         {#if p.thumb}<img src={thumbUrl(p.thumb)} alt="" />{:else}<span class="nothumb"></span>{/if}
-        <button class="inkrow" onclick={() => openProject(p)} disabled={!!busy}><span>{p.name} <span class="muted">· {p.steps.length} {stepsWord(p.steps.length)} · {(p.bytes / 1048576).toFixed(1)} МБ · {new Date(p.updated).toLocaleString('ru', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span></span></button>
-        <button class="alt" onclick={() => shareProject(p)} aria-label="Файл проекта">⤓</button>
-        <button class="alt" onclick={() => removeProject(p)} aria-label="Удалить">✕</button>
+        <button class="inkrow" onclick={() => openProject(p)} disabled={!!busy}><span>{p.name} <span class="muted">· {p.steps.length} {stepsWord(p.steps.length)} · {num(p.bytes / 1048576)} {t('unit.mb')} · {new Date(p.updated).toLocaleString(i18n.lang, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span></span></button>
+        <button class="alt" onclick={() => shareProject(p)} aria-label={t('proj.file')} title={t('proj.file')}>⤓</button>
+        <button class="alt" onclick={() => removeProject(p)} aria-label={t('proj.delete')} title={t('proj.delete')}>✕</button>
       </div>
     {/each}
-    <label class="file">Открыть файл проекта .vishar <input type="file" accept=".vishar,application/octet-stream" onchange={onProjectFile} /></label>
+    <label class="file">{t('proj.openFile')} <input type="file" accept=".vishar,application/octet-stream" onchange={onProjectFile} /></label>
     {#if storage}
-      <p class="muted">Хранилище: {storage.kind === 'opfs' ? 'OPFS' : 'IndexedDB'} · занято {storage.usage != null ? (storage.usage / 1048576).toFixed(1) : '?'} МБ из {storage.quota != null ? Math.round(storage.quota / 1048576) : '?'} · {storage.persisted ? 'защищено от очистки' : 'браузер может очистить, если долго не открывать'}</p>
+      <p class="muted">{t('proj.storage', { kind: storage.kind === 'opfs' ? 'OPFS' : 'IndexedDB', used: storage.usage != null ? num(storage.usage / 1048576) : '?', quota: storage.quota != null ? Math.round(storage.quota / 1048576) : '?' })} · {storage.persisted ? t('proj.persisted') : t('proj.notPersisted')}</p>
     {/if}
   </details>
 
   <div class="pinned">
   <div class="stage" bind:this={box} bind:clientWidth={stageW} bind:clientHeight={stageH}>
-    <canvas bind:this={canvas} onpointerdown={tap} onpointermove={move} onpointerup={release} onpointercancel={release}></canvas>
+    <canvas bind:this={canvas} onpointerdown={tap} onpointermove={move} onpointerup={release} onpointercancel={release}
+      aria-label={opened ? `${t(TABS.find(([v]) => v === section)?.[1] ?? 'tab.original')}: ${opened.label}` : t('stage.empty')}></canvas>
+    {#if gridLines}
+      <svg class="overlay grid" width={stageW} height={stageH} aria-hidden="true">
+        {#each gridLines.sub as l}<line x1={l[0]} y1={l[1]} x2={l[2]} y2={l[3]} style:stroke={gridStroke} style:stroke-width="0.75px" stroke-opacity={grid.opacity * 0.6} />{/each}
+        {#each gridLines.main as l}<line x1={l[0]} y1={l[1]} x2={l[2]} y2={l[3]} style:stroke={gridStroke} style:stroke-width="1.25px" stroke-opacity={grid.opacity} />{/each}
+      </svg>
+    {/if}
     {#if overlay.length}
       <svg class="overlay" width={stageW} height={stageH}>
         {#each overlay as m}
@@ -873,7 +1035,7 @@
           <circle cx={m.mx} cy={m.my} r="9" fill={m.s.hex} />
           <text x={m.mx} y={m.my + 4} fill={m.s.lab[0] > 55 ? '#000' : '#fff'}>{m.i + 1}</text>
           <rect class="sw" x={m.sx} y={m.sy} width={m.sw} height={m.sw} fill={m.s.hex}
-            role="button" tabindex="-1" onpointerdown={(e) => { e.stopPropagation(); selectSwatch(m.s, `${pkind} ${m.i + 1}`); }} />
+            role="button" tabindex="-1" aria-label={`${pkind} ${m.i + 1}`} onpointerdown={(e) => { e.stopPropagation(); selectSwatch(m.s, `${pkind} ${m.i + 1}`); }} />
         {/each}
       </svg>
     {/if}
@@ -883,329 +1045,337 @@
         <span style="background: {picked.info.codes.HEX}"></span>
       </div>
     {/if}
-    {#if !opened && !busy}<p class="hint">Открой фото или образец</p>{/if}
-    {#if busy}<p class="hint">{busy}</p>{/if}
-    {#if progress > 0}<div class="progress"><span style="width: {Math.round(progress * 100)}%"></span></div>{/if}
+    {#if !opened}<div class="cover"></div>{/if}
+    {#if !opened && !busy}<p class="hint">{engine ? t('stage.empty') : error ? '' : t('stage.starting')}</p>{/if}
+    {#if busy}<p class="hint" role="status">{busy}</p>{/if}
+    {#if progress > 0}<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(progress * 100)}><span style="width: {Math.round(progress * 100)}%"></span></div>{/if}
   </div>
-  {#if error}<p class="error">{error}</p>{/if}
+  {#if error}<p class="error" role="alert">{error}</p>{/if}
 
   {#if opened}
     <div class="chain">
-      <span class="muted">В работе: {chain.map((c) => c.label).join(' → ') || opened.label}</span>
-      {#if section !== 'original' && section !== 'palette'}<button class="primary" onclick={commit} disabled={!!busy}>Взять в работу</button>{/if}
+      <span class="muted">{t('chain.inWork')}: {chain.map((c) => stepLabel(c.label)).join(' → ') || opened.label}</span>
+      {#if section !== 'original' && section !== 'palette'}<button class="primary" onclick={commit} disabled={!!busy}>{t('chain.commit')}</button>{/if}
       {#if chain.length > 1}
-        <button onclick={() => stepBack()} disabled={!!busy}>Шаг назад</button>
-        <button onclick={() => stepBack(true)} disabled={!!busy}>К оригиналу</button>
+        <button onclick={() => stepBack()} disabled={!!busy}>{t('chain.back')}</button>
+        <button onclick={() => stepBack(true)} disabled={!!busy}>{t('chain.toOriginal')}</button>
       {/if}
+      <button onclick={exportView} disabled={!!busy}>⤓ PNG</button>
+      <button class:active={grid.on} aria-pressed={grid.on} onclick={() => { grid.on = !grid.on; gridOpen = grid.on; }}># {t('grid.title')}</button>
       {@render i('chain')}
     </div>
+    {#if fullInfo}<p class="muted">{fullInfo}</p>{/if}
   {/if}
 
-  <nav class="tabs">
-    {#each TABS as [v, label]}
-      <button class:active={section === v} onclick={() => openSection(v)}>{label}</button>
+  <nav class="tabs" aria-label={t('tabs.label')}>
+    {#each TABS as [v, key]}
+      <button class:active={section === v} aria-current={section === v ? 'page' : undefined} onclick={() => openSection(v)}>{t(key)}</button>
     {/each}
   </nav>
   </div>
 
   <section class="card controls">
-    {#if section === 'original'}
-      <p class="muted">Тапни по фото: пипетка покажет цвет и его коды.</p>
+    {#if !opened}
+      <p class="muted">{t('controls.openFirst')}</p>
+    {:else if section === 'original'}
+      <p class="muted">{t('orig.hint')}</p>
     {:else if section === 'palette'}
-      <p class="muted">Палитра считается по оригиналу. Тап по образцу или по фото открывает карточку цвета.</p>
+      <p class="muted">{t('pal.hint')}</p>
     {/if}
+    {#if opened}
     {#if vs.view === 'values'}
-      <label class="row"><span>Уровни {@render i('values.levels')}</span> <b>{vs.values.levels}</b><input type="range" min="2" max="20" bind:value={vs.values.levels} /></label>
+      <label class="row"><span>{t('values.levels')} {@render i('values.levels')}</span> <b>{vs.values.levels}</b><input type="range" min="2" max="20" bind:value={vs.values.levels} /></label>
       <div class="row">
-        <span>Шкала {@render i('values.scale')}</span>
+        <span>{t('values.scale')} {@render i('values.scale')}</span>
         <div class="seg">
           <button class:active={vs.values.scale === 'lstar'} onclick={() => (vs.values.scale = 'lstar')}>L*</button>
           <button class:active={vs.values.scale === 'luma'} onclick={() => (vs.values.scale = 'luma')}>luma</button>
         </div>
       </div>
       <div class="row">
-        <span>Пороги {@render i('values.method')}</span>
+        <span>{t('values.method')} {@render i('values.method')}</span>
         <div class="seg">
           <button class:active={vs.values.method === 'kmeans'} onclick={() => (vs.values.method = 'kmeans')}>k-means</button>
           <button class:active={vs.values.method === 'kmeans-sqrt'} onclick={() => (vs.values.method = 'kmeans-sqrt')}>√count</button>
-          <button class:active={vs.values.method === 'even'} onclick={() => (vs.values.method = 'even')}>равные</button>
+          <button class:active={vs.values.method === 'even'} onclick={() => (vs.values.method = 'even')}>{t('values.even')}</button>
         </div>
       </div>
-      <label class="row"><span>Яркость {@render i('values.brightness')}</span> <b>{vs.values.brightness}</b><input type="range" min="-50" max="50" bind:value={vs.values.brightness} /></label>
-      <label class="row check"><input type="checkbox" bind:checked={vs.values.showHue} /> Show Hue {@render i('values.showHue')}</label>
+      <label class="row"><span>{t('values.brightness')} {@render i('values.brightness')}</span> <b>{vs.values.brightness}</b><input type="range" min="-50" max="50" bind:value={vs.values.brightness} /></label>
+      <label class="row check"><input type="checkbox" bind:checked={vs.values.showHue} /> {t('values.showHue')} {@render i('values.showHue')}</label>
       <div class="row">
-        <button class="chip" onclick={compat}>Как в оригинале</button> {@render i('values.compat')}
-        <span class="muted">тап по фото подсвечивает уровень{vs.values.highlight >= 0 ? ` · уровень ${vs.values.highlight + 1}` : ''}</span>
+        <button class="chip" onclick={compat}>{t('values.compat')}</button> {@render i('values.compat')}
+        <span class="muted">{t('values.tapHint')}{vs.values.highlight >= 0 ? ` · ${t('values.levelN', { n: vs.values.highlight + 1 })}` : ''}</span>
       </div>
     {:else if vs.view === 'notan'}
       <div class="row">
-        <span>Порог {@render i('notan.mode')}</span>
+        <span>{t('notan.mode')} {@render i('notan.mode')}</span>
         <div class="seg">
-          {#each [['otsu', 'Otsu'], ['median', 'медиана'], ['auto', 'авто']] as [v, label]}
+          {#each [['otsu', 'Otsu'], ['median', t('notan.median')], ['auto', t('notan.auto')]] as [v, label]}
             <button class:active={vs.notan.mode === v} onclick={() => (vs.notan.mode = v as 'otsu')}>{label}</button>
           {/each}
         </div>
       </div>
       <div class="row">
-        <span>Уровни {@render i('notan.levels')}</span>
+        <span>{t('notan.levels')} {@render i('notan.levels')}</span>
         <div class="seg">
           <button class:active={vs.notan.levels === 2} onclick={() => (vs.notan.levels = 2)}>2</button>
           <button class:active={vs.notan.levels === 3} onclick={() => (vs.notan.levels = 3)}>3</button>
         </div>
       </div>
       <div class="row">
-        <span>Шкала {@render i('notan.scale')}</span>
+        <span>{t('values.scale')} {@render i('notan.scale')}</span>
         <div class="seg">
           <button class:active={vs.notan.scale === 'lstar'} onclick={() => (vs.notan.scale = 'lstar')}>L*</button>
           <button class:active={vs.notan.scale === 'luma'} onclick={() => (vs.notan.scale = 'luma')}>luma</button>
         </div>
       </div>
-      <label class="row"><span>Баланс {@render i('notan.balance')}</span> <b>{vs.notan.balance}</b><input type="range" min="-50" max="50" bind:value={vs.notan.balance} /></label>
-      <label class="row check"><input type="checkbox" bind:checked={vs.notan.invert} /> Инверсия {@render i('notan.invert')}</label>
+      <label class="row"><span>{t('common.balance')} {@render i('notan.balance')}</span> <b>{vs.notan.balance}</b><input type="range" min="-50" max="50" bind:value={vs.notan.balance} /></label>
+      <label class="row check"><input type="checkbox" bind:checked={vs.notan.invert} /> {t('common.invert')} {@render i('notan.invert')}</label>
     {:else if vs.view === 'temperature'}
       <div class="row">
-        <span>Нейтраль {@render i('temp.mode')}</span>
+        <span>{t('temp.neutralLabel')} {@render i('temp.mode')}</span>
         <div class="seg">
-          <button class:active={vs.temperature.mode === 'relative'} onclick={() => (vs.temperature.mode = 'relative')}>по фото</button>
-          <button class:active={vs.temperature.mode === 'absolute'} onclick={() => (vs.temperature.mode = 'absolute')}>абсолютная</button>
+          <button class:active={vs.temperature.mode === 'relative'} onclick={() => (vs.temperature.mode = 'relative')}>{t('temp.relative')}</button>
+          <button class:active={vs.temperature.mode === 'absolute'} onclick={() => (vs.temperature.mode = 'absolute')}>{t('temp.absolute')}</button>
         </div>
       </div>
       <div class="row">
-        <span>Вид {@render i('temp.style')}</span>
+        <span>{t('common.view')} {@render i('temp.style')}</span>
         <div class="seg">
-          {#each [['map', 'карта'], ['shaded', 'со светлотой'], ['two', '2 цвета']] as [v, label]}
+          {#each [['map', t('temp.map')], ['shaded', t('temp.shaded')], ['two', t('temp.two')]] as [v, label]}
             <button class:active={vs.temperature.style === v} onclick={() => (vs.temperature.style = v as 'map')}>{label}</button>
           {/each}
         </div>
       </div>
-      <label class="row"><span>Баланс {@render i('temp.balance')}</span> <b>{vs.temperature.balance}</b><input type="range" min="-30" max="30" bind:value={vs.temperature.balance} /></label>
+      <label class="row"><span>{t('common.balance')} {@render i('temp.balance')}</span> <b>{vs.temperature.balance}</b><input type="range" min="-30" max="30" bind:value={vs.temperature.balance} /></label>
     {:else if vs.view === 'highlight'}
       {#if vs.highlight.target}
         <div class="row">
-          <span>Цвет</span>
+          <span>{t('hl.color')}</span>
           <span class="dot" style="background: {hex(labToSrgb(...vs.highlight.target))}"></span>
-          <span class="muted">L* {vs.highlight.target[0].toFixed(1)}, a* {vs.highlight.target[1].toFixed(1)}, b* {vs.highlight.target[2].toFixed(1)}</span>
+          <span class="muted">L* {num(vs.highlight.target[0])}, a* {num(vs.highlight.target[1])}, b* {num(vs.highlight.target[2])}</span>
         </div>
-        <p class="muted">Тапни по фото, чтобы выбрать другой цвет.</p>
+        <p class="muted">{t('hl.tapOther')}</p>
       {:else}
-        <p class="muted">Тапни по фото: подсветятся все места похожего цвета. Допуск задаёт, насколько похожего.</p>
+        <p class="muted">{t('hl.tapFirst')}</p>
       {/if}
-      <label class="row"><span>Допуск ΔE2000 {@render i('hl.tolerance')}</span> <b>{vs.highlight.tolerance}</b><input type="range" min="0" max="50" step="0.5" bind:value={vs.highlight.tolerance} /></label>
+      <label class="row"><span>{t('hl.tolerance')} {@render i('hl.tolerance')}</span> <b>{vs.highlight.tolerance}</b><input type="range" min="0" max="50" step="0.5" bind:value={vs.highlight.tolerance} /></label>
       <div class="row">
-        <span>Вид {@render i('hl.mode')}</span>
+        <span>{t('common.view')} {@render i('hl.mode')}</span>
         <div class="seg">
-          <button class:active={vs.highlight.mode === 'highlight'} onclick={() => (vs.highlight.mode = 'highlight')}>подсветка</button>
-          <button class:active={vs.highlight.mode === 'outline'} onclick={() => (vs.highlight.mode = 'outline')}>контур</button>
+          <button class:active={vs.highlight.mode === 'highlight'} onclick={() => (vs.highlight.mode = 'highlight')}>{t('hl.modeHighlight')}</button>
+          <button class:active={vs.highlight.mode === 'outline'} onclick={() => (vs.highlight.mode = 'outline')}>{t('hl.modeOutline')}</button>
         </div>
       </div>
     {:else if vs.view === 'simplify'}
       <div class="row">
-        <span>Стиль {@render i('simp.mode')}</span>
+        <span>{t('common.style')} {@render i('simp.mode')}</span>
         <div class="seg">
-          {#each [['clustering', 'кластеры'], ['graph', 'граф'], ['posterize', 'постер']] as [v, label]}
+          {#each [['clustering', t('simp.clustering')], ['graph', t('simp.graph')], ['posterize', t('simp.posterize')]] as [v, label]}
             <button class:active={vs.simplify.mode === v} onclick={() => (vs.simplify.mode = v as 'clustering')}>{label}</button>
           {/each}
         </div>
       </div>
-      <label class="row"><span>Детали {@render i('simp.details')}</span> <b>{vs.simplify.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.simplify.details} /></label>
-      <label class="row"><span>Лимит цветов {@render i('simp.limit')}</span> <b>{vs.simplify.paletteLimit || 'нет'}</b><input type="range" min="0" max="16" bind:value={vs.simplify.paletteLimit} /></label>
-      <label class="row check"><input type="checkbox" bind:checked={vs.simplify.keepDark} /> Сохранять тонкие тёмные элементы {@render i('simp.keepDark')}</label>
+      <label class="row"><span>{t('common.details')} {@render i('simp.details')}</span> <b>{vs.simplify.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.simplify.details} /></label>
+      <label class="row"><span>{t('common.colorLimit')} {@render i('simp.limit')}</span> <b>{vs.simplify.paletteLimit || t('common.none')}</b><input type="range" min="0" max="16" bind:value={vs.simplify.paletteLimit} /></label>
+      <label class="row check"><input type="checkbox" bind:checked={vs.simplify.keepDark} /> {t('simp.keepDark')} {@render i('simp.keepDark')}</label>
       {#if vs.simplify.keepDark}
-        <label class="row"><span>Темнее пятна на ΔL* {@render i('simp.darkDelta')}</span> <b>{vs.simplify.darkDelta}</b><input type="range" min="5" max="40" bind:value={vs.simplify.darkDelta} /></label>
+        <label class="row"><span>{t('simp.darkDelta')} {@render i('simp.darkDelta')}</span> <b>{vs.simplify.darkDelta}</b><input type="range" min="5" max="40" bind:value={vs.simplify.darkDelta} /></label>
       {/if}
     {:else if vs.view === 'drawing'}
       <div class="row">
-        <span>Стиль {@render i('draw.mode')}</span>
+        <span>{t('common.style')} {@render i('draw.mode')}</span>
         <div class="seg">
           <button class:active={vs.drawing.mode === 'sketch'} onclick={() => (vs.drawing.mode = 'sketch')}>Sketch</button>
           <button class:active={vs.drawing.mode === 'contours'} onclick={() => (vs.drawing.mode = 'contours')}>Contours</button>
         </div>
       </div>
-      <label class="row"><span>Line {@render i('draw.line')}</span> <b>{vs.drawing.line}</b><input type="range" min="0" max="100" bind:value={vs.drawing.line} /></label>
-      <label class="row"><span>Stroke {@render i('draw.stroke')}</span> <b>{vs.drawing.stroke}</b><input type="range" min="1" max="5" bind:value={vs.drawing.stroke} /></label>
-      <label class="row check"><input type="checkbox" bind:checked={vs.drawing.invert} /> Инверсия {@render i('draw.invert')}</label>
+      <label class="row"><span>{t('draw.line')} {@render i('draw.line')}</span> <b>{vs.drawing.line}</b><input type="range" min="0" max="100" bind:value={vs.drawing.line} /></label>
+      <label class="row"><span>{t('draw.stroke')} {@render i('draw.stroke')}</span> <b>{vs.drawing.stroke}</b><input type="range" min="1" max="5" bind:value={vs.drawing.stroke} /></label>
+      <label class="row check"><input type="checkbox" bind:checked={vs.drawing.invert} /> {t('common.invert')} {@render i('draw.invert')}</label>
       <div class="row">
         <button class="primary" onclick={exportSvg} disabled={!opened}>SVG</button>
-        <button onclick={exportInk} disabled={!opened}>PNG без фона</button>
+        <button onclick={exportInk} disabled={!opened}>{t('draw.pngNoBg')}</button>
         {@render i('draw.export')}
       </div>
-      {#if svgInfo}<p class="muted">SVG: {svgInfo.loops} контуров, {svgInfo.points} точек, {(svgInfo.bytes / 1024).toFixed(0)} КБ, {svgInfo.ms} мс</p>{/if}
+      {#if svgInfo}<p class="muted">{t('draw.svgInfo', { loops: svgInfo.loops, points: svgInfo.points, kb: Math.round(svgInfo.bytes / 1024), ms: svgInfo.ms })}</p>{/if}
     {:else if vs.view === 'tattoo'}
-      {@const t = vs.tattoo}
+      {@const tt = vs.tattoo}
       <div class="seg wrap">
-        {#each TOOLS as [k, label]}<button class:active={t.tool === k} onclick={() => { vs.tattoo.tool = k; vs.tattoo.pigments.focus = -1; }}>{label}</button>{/each}
+        {#each TOOLS as [k, key]}<button class:active={tt.tool === k} onclick={() => { vs.tattoo.tool = k; vs.tattoo.pigments.focus = -1; }}>{t(key)}</button>{/each}
         {@render i('tat.tool')}
       </div>
-      {#if t.tool !== 'skin' && t.skin.use}
-        <div class="row"><span class="muted">Работаешь с версией для кожи: {toneName(t.skin.tone)} <span class="dot" style="background: rgb({skinRgb(t.skin).join(',')})"></span></span><button onclick={() => (vs.tattoo.skin.use = false)}>Исходный эскиз</button></div>
+      {#if tt.tool !== 'skin' && tt.skin.use}
+        <div class="row"><span class="muted">{t('tat.skinVersion', { tone: toneName(tt.skin.tone) })} <span class="dot" style="background: rgb({skinRgb(tt.skin).join(',')})"></span></span><button onclick={() => (vs.tattoo.skin.use = false)}>{t('tat.sourceDesign')}</button></div>
       {/if}
-      {#if t.tool !== 'skin' && t.tool !== 'pigments' && t.tool !== 'design'}
-        <label class="row"><span>Ширина тату, см {@render i('tat.width')}</span> <b>{t.widthCm}</b><input type="range" min="2" max="40" step="0.5" bind:value={vs.tattoo.widthCm} /></label>
+      {#if tt.tool !== 'skin' && tt.tool !== 'pigments' && tt.tool !== 'design'}
+        <label class="row"><span>{t('tat.width')} {@render i('tat.width')}</span> <b>{num(tt.widthCm)}</b><input type="range" min="2" max="40" step="0.5" bind:value={vs.tattoo.widthCm} /></label>
       {/if}
-      <div class="row"><span class="muted">Настройки всех инструментов {@render i('tat.reset')}</span><button onclick={() => (vs.tattoo = { ...structuredClone(DEFAULT_TATTOO), tool: t.tool })}>Сбросить</button></div>
-      {#if t.tool === 'design'}
-        <p class="muted">Эскиз как есть, без упрощения. Выбери инструмент выше: каждый проверяет одно свойство эскиза.</p>
-      {:else if t.tool === 'contrast'}
-        <p class="muted">Эскиз упрощается до пятен; границы соседних цветов с близкой светлотой отмечены полосками: со временем они могут слиться.</p>
-        <label class="row"><span>Порог ΔL* {@render i('con.minDL')}</span> <b>{t.contrast.minDL}</b><input type="range" min="3" max="40" bind:value={vs.tattoo.contrast.minDL} /></label>
-        <label class="row"><span>Детали {@render i('con.details')}</span> <b>{t.contrast.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.contrast.details} /></label>
-        <label class="row"><span>Лимит цветов {@render i('con.levels')}</span> <b>{t.contrast.levels || 'нет'}</b><input type="range" min="0" max="5" bind:value={vs.tattoo.contrast.levels} /></label>
-        <label class="row"><span>«Один градиент» до ΔE {@render i('con.sameDE')}</span> <b>{t.contrast.sameDE}</b><input type="range" min="0" max="15" bind:value={vs.tattoo.contrast.sameDE} /></label>
-        <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.contrast.bw} /> Ч/б: показать светлоту вместо цвета {@render i('con.bw')}</label>
-      {:else if t.tool === 'pigments'}
-        {@const pg = t.pigments}
+      <div class="row"><span class="muted">{t('tat.allSettings')} {@render i('tat.reset')}</span><button onclick={() => (vs.tattoo = { ...structuredClone(DEFAULT_TATTOO), tool: tt.tool })}>{t('common.reset')}</button></div>
+      {#if tt.tool === 'design'}
+        <p class="muted">{t('tat.designHint')}</p>
+      {:else if tt.tool === 'contrast'}
+        <p class="muted">{t('con.hint')}</p>
+        <label class="row"><span>{t('con.minDL')} {@render i('con.minDL')}</span> <b>{tt.contrast.minDL}</b><input type="range" min="3" max="40" bind:value={vs.tattoo.contrast.minDL} /></label>
+        <label class="row"><span>{t('common.details')} {@render i('con.details')}</span> <b>{tt.contrast.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.contrast.details} /></label>
+        <label class="row"><span>{t('common.colorLimit')} {@render i('con.levels')}</span> <b>{tt.contrast.levels || t('common.none')}</b><input type="range" min="0" max="5" bind:value={vs.tattoo.contrast.levels} /></label>
+        <label class="row"><span>{t('con.sameDE')} {@render i('con.sameDE')}</span> <b>{tt.contrast.sameDE}</b><input type="range" min="0" max="15" bind:value={vs.tattoo.contrast.sameDE} /></label>
+        <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.contrast.bw} /> {t('con.bw')} {@render i('con.bw')}</label>
+      {:else if tt.tool === 'pigments'}
+        {@const pg = tt.pigments}
         <div class="row">
-          <span>Режим {@render i('pig.mode')}</span>
+          <span>{t('pig.mode')} {@render i('pig.mode')}</span>
           <div class="seg">
-            <button class:active={pg.mode === 'color'} onclick={() => (vs.tattoo.pigments = { ...vs.tattoo.pigments, mode: 'color', focus: -1 })}>Цвет</button>
+            <button class:active={pg.mode === 'color'} onclick={() => (vs.tattoo.pigments = { ...vs.tattoo.pigments, mode: 'color', focus: -1 })}>{t('pig.color')}</button>
             <button class:active={pg.mode === 'bg'} onclick={() => (vs.tattoo.pigments = { ...vs.tattoo.pigments, mode: 'bg', focus: -1 })}>Black & Grey</button>
           </div>
         </div>
-        <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.pigments.blend} /> {pg.mode === 'color' ? 'Смешивание: до 2 красок и разбавление' : 'Плавные переходы между тонами'} {@render i('pig.blend')}</label>
+        <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.pigments.blend} /> {pg.mode === 'color' ? t('pig.blendColor') : t('pig.blendBg')} {@render i('pig.blend')}</label>
         {#if pg.mode === 'color'}
-          <label class="row"><span>Бренд {@render i('pig.brand')}</span>
+          <label class="row"><span>{t('pig.brand')} {@render i('pig.brand')}</span>
             <select bind:value={vs.tattoo.pigments.brand}>
               {#each INK_BRANDS as b}<option value={b}>{b}</option>{/each}
-              <option value="">все бренды</option>
+              <option value="">{t('common.allBrands')}</option>
             </select>
           </label>
-          <label class="row"><span>Красок {@render i('pig.max')}</span> <b>{pg.maxInks}</b><input type="range" min="1" max="16" bind:value={vs.tattoo.pigments.maxInks} /></label>
-          <label class="row"><span>Далеко, ΔE {@render i('pig.far')}</span> <b>{pg.farDE}</b><input type="range" min="3" max="25" bind:value={vs.tattoo.pigments.farDE} /></label>
+          <label class="row"><span>{t('pig.max')} {@render i('pig.max')}</span> <b>{pg.maxInks}</b><input type="range" min="1" max="16" bind:value={vs.tattoo.pigments.maxInks} /></label>
+          <label class="row"><span>{t('pig.far')} {@render i('pig.far')}</span> <b>{pg.farDE}</b><input type="range" min="3" max="25" bind:value={vs.tattoo.pigments.farDE} /></label>
         {:else}
-          <label class="row"><span>Линейка {@render i('pig.series')}</span>
+          <label class="row"><span>{t('pig.series')} {@render i('pig.series')}</span>
             <select value={pg.series} onchange={(e) => setSeries(+(e.currentTarget as HTMLSelectElement).value)}>
-              <option value={-1}>свои тоны</option>
+              <option value={-1}>{t('pig.ownTones')}</option>
               {#each GREY_SERIES as g, k}<option value={k}>{g.brand} · {g.series} ({g.names.length})</option>{/each}
             </select>
           </label>
           {#if pg.series < 0}
-            <label class="row"><span>Тонов</span> <b>{pg.tonesL.length}</b><input type="range" min="2" max="6" value={pg.tonesL.length} oninput={(e) => (vs.tattoo.pigments.tonesL = evenTones(+(e.currentTarget as HTMLInputElement).value))} /></label>
+            <label class="row"><span>{t('pig.tones')}</span> <b>{pg.tonesL.length}</b><input type="range" min="2" max="6" value={pg.tonesL.length} oninput={(e) => (vs.tattoo.pigments.tonesL = evenTones(+(e.currentTarget as HTMLInputElement).value))} /></label>
           {/if}
           {#each pg.tonesL as L, k}
-            <label class="row"><span>{pg.series >= 0 ? GREY_SERIES[pg.series].names[k] : `Тон ${k + 1}`} {#if k === 0}{@render i('pig.tone')}{/if}</span> <b>{L}</b><input type="range" min="0" max="95" bind:value={vs.tattoo.pigments.tonesL[k]} /></label>
+            <label class="row"><span>{pg.series >= 0 ? GREY_SERIES[pg.series].names[k] : t('pig.toneN', { n: k + 1 })} {#if k === 0}{@render i('pig.tone')}{/if}</span> <b>{L}</b><input type="range" min="0" max="95" bind:value={vs.tattoo.pigments.tonesL[k]} /></label>
           {/each}
         {/if}
         <div class="row">
-          <span>Основа {@render i('pig.source')}</span>
+          <span>{t('pig.source')} {@render i('pig.source')}</span>
           <div class="seg">
-            <button class:active={pg.source === 'photo'} onclick={() => (vs.tattoo.pigments.source = 'photo')}>фото</button>
-            <button class:active={pg.source === 'patches'} onclick={() => (vs.tattoo.pigments.source = 'patches')}>пятна Simplify</button>
+            <button class:active={pg.source === 'photo'} onclick={() => (vs.tattoo.pigments.source = 'photo')}>{t('pig.sourcePhoto')}</button>
+            <button class:active={pg.source === 'patches'} onclick={() => (vs.tattoo.pigments.source = 'patches')}>{t('pig.sourcePatches')}</button>
           </div>
         </div>
         {#if pg.source === 'patches'}
-          <label class="row"><span>Детали {@render i('simp.details')}</span> <b>{pg.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.pigments.details} /></label>
+          <label class="row"><span>{t('common.details')} {@render i('simp.details')}</span> <b>{pg.details + 1}</b><input type="range" min="0" max="8" bind:value={vs.tattoo.pigments.details} /></label>
         {/if}
-        <p class="muted">Тапни по краске в списке: останется видна только она, повторный тап покажет все. Тап или ведение пальцем по эскизу работает как пипетка: внизу появятся цвет точки, рецепт из красок эскиза и ближайшие краски бренда. ⇄ у краски — замены, если её нет в наличии {@render i('pig.alt')}</p>
-      {:else if t.tool === 'lines'}
-        <p class="muted">Проверка, удержатся ли линии и просветы при этом размере тату. Красное: линия тоньше минимума, может расплыться или пропасть. Синее: просвет уже минимума, может затянуться. Ширина в см задаёт масштаб: чем меньше тату, тем больше красного и синего.</p>
+        <p class="muted">{t('pig.hint')} {@render i('pig.alt')}</p>
+      {:else if tt.tool === 'lines'}
+        <p class="muted">{t('lin.hint')}</p>
         <div class="row">
-          <span>Линии {@render i('lin.source')}</span>
+          <span>{t('lin.source')} {@render i('lin.source')}</span>
           <div class="seg">
-            <button class:active={t.lines.source === 'design'} onclick={() => (vs.tattoo.lines.source = 'design')}>тёмное эскиза</button>
-            <button class:active={t.lines.source === 'drawing'} onclick={() => (vs.tattoo.lines.source = 'drawing')}>из Drawing</button>
+            <button class:active={tt.lines.source === 'design'} onclick={() => (vs.tattoo.lines.source = 'design')}>{t('lin.fromDesign')}</button>
+            <button class:active={tt.lines.source === 'drawing'} onclick={() => (vs.tattoo.lines.source = 'drawing')}>{t('lin.fromDrawing')}</button>
           </div>
         </div>
-        {#if t.lines.source === 'design'}
-          <label class="row"><span>Линия темнее L* {@render i('lin.inkL')}</span> <b>{t.lines.inkL}</b><input type="range" min="5" max="80" bind:value={vs.tattoo.lines.inkL} /></label>
-          <p class="muted">Пиксели темнее этой светлоты считаются линией (серые на картинке). 0 = чёрный, 100 = белый.</p>
+        {#if tt.lines.source === 'design'}
+          <label class="row"><span>{t('lin.inkL')} {@render i('lin.inkL')}</span> <b>{tt.lines.inkL}</b><input type="range" min="5" max="80" bind:value={vs.tattoo.lines.inkL} /></label>
+          <p class="muted">{t('lin.inkLHint')}</p>
         {:else}
-          <p class="muted">Берётся текущий Drawing: стиль, Line и Stroke настраиваются во вкладке Drawing.</p>
+          <p class="muted">{t('lin.drawingHint')}</p>
         {/if}
-        <label class="row"><span>Мин. линия, мм {@render i('lin.minLine')}</span> <b>{t.lines.minLineMm}</b><input type="range" min="0.1" max="2" step="0.05" bind:value={vs.tattoo.lines.minLineMm} /></label>
-        <label class="row"><span>Мин. зазор, мм {@render i('lin.minGap')}</span> <b>{t.lines.minGapMm}</b><input type="range" min="0.2" max="3" step="0.1" bind:value={vs.tattoo.lines.minGapMm} /></label>
-        <p class="muted"><span class="dot" style="background: rgb(230,0,40)"></span> линия тоньше минимума · <span class="dot" style="background: rgb(0,110,255)"></span> зазор уже минимума</p>
+        <label class="row"><span>{t('lin.minLine')} {@render i('lin.minLine')}</span> <b>{num(tt.lines.minLineMm, 2)}</b><input type="range" min="0.1" max="2" step="0.05" bind:value={vs.tattoo.lines.minLineMm} /></label>
+        <label class="row"><span>{t('lin.minGap')} {@render i('lin.minGap')}</span> <b>{num(tt.lines.minGapMm)}</b><input type="range" min="0.2" max="3" step="0.1" bind:value={vs.tattoo.lines.minGapMm} /></label>
+        <p class="muted"><span class="dot" style="background: rgb(230,0,40)"></span> {t('lin.legendThin')} · <span class="dot" style="background: rgb(0,110,255)"></span> {t('lin.legendGap')}</p>
         <div class="row">
-          <label class="check"><input type="checkbox" bind:checked={vs.tattoo.lines.mirror} /> зеркально</label>
-          <button class="primary" onclick={exportStencil} disabled={!opened}>Трафарет PDF 1:1</button> {@render i('lin.pdf')}
+          <label class="check"><input type="checkbox" bind:checked={vs.tattoo.lines.mirror} /> {t('lin.mirror')}</label>
+          <button class="primary" onclick={exportStencil} disabled={!opened}>{t('lin.pdf')}</button> {@render i('lin.pdf')}
         </div>
-        {#if stencilInfo}<p class="muted">PDF: эскиз {stencilInfo.designMm[0]}×{stencilInfo.designMm[1]} мм на листе {stencilInfo.pageMm[0]}×{stencilInfo.pageMm[1]} мм, {(stencilInfo.bytes / 1024).toFixed(0)} КБ. Печатай в масштабе 100 % и проверь линейку 10 мм.</p>{/if}
-      {:else if t.tool === 'distance'}
-        <label class="row"><span>Расстояние, м {@render i('dist.m')}</span> <b>{t.distance.distanceM}</b><input type="range" min="0.5" max="10" step="0.5" bind:value={vs.tattoo.distance.distanceM} /></label>
-        <label class="row"><span>Острота зрения, ′ {@render i('dist.arcmin')}</span> <b>{t.distance.arcmin}</b><input type="range" min="0.5" max="3" step="0.5" bind:value={vs.tattoo.distance.arcmin} /></label>
-      {:else if t.tool === 'spread'}
-        <label class="row"><span>Растекание, мм {@render i('spr.mm')}</span> <b>{t.spread.spreadMm}</b><input type="range" min="0" max="0.6" step="0.05" bind:value={vs.tattoo.spread.spreadMm} /></label>
-        <label class="row"><span>Контраст {@render i('spr.contrast')}</span> <b>{Math.round(t.spread.contrast * 100)}%</b><input type="range" min="0.5" max="1" step="0.05" bind:value={vs.tattoo.spread.contrast} /></label>
-        <label class="row"><span>Размытие, мм {@render i('spr.blur')}</span> <b>{t.spread.blurMm}</b><input type="range" min="0" max="0.5" step="0.05" bind:value={vs.tattoo.spread.blurMm} /></label>
-        <p class="muted">Так может снизиться читаемость; реальный результат зависит от кожи и техники.</p>
+        {#if stencilInfo}<p class="muted">{t('lin.pdfInfo', { dw: stencilInfo.designMm[0], dh: stencilInfo.designMm[1], pw: stencilInfo.pageMm[0], ph: stencilInfo.pageMm[1], kb: Math.round(stencilInfo.bytes / 1024) })}</p>{/if}
+      {:else if tt.tool === 'distance'}
+        <label class="row"><span>{t('dist.m')} {@render i('dist.m')}</span> <b>{num(tt.distance.distanceM)}</b><input type="range" min="0.5" max="10" step="0.5" bind:value={vs.tattoo.distance.distanceM} /></label>
+        <label class="row"><span>{t('dist.arcmin')} {@render i('dist.arcmin')}</span> <b>{num(tt.distance.arcmin)}</b><input type="range" min="0.5" max="3" step="0.5" bind:value={vs.tattoo.distance.arcmin} /></label>
+      {:else if tt.tool === 'spread'}
+        <label class="row"><span>{t('spr.mm')} {@render i('spr.mm')}</span> <b>{num(tt.spread.spreadMm, 2)}</b><input type="range" min="0" max="0.6" step="0.05" bind:value={vs.tattoo.spread.spreadMm} /></label>
+        <label class="row"><span>{t('spr.contrast')} {@render i('spr.contrast')}</span> <b>{Math.round(tt.spread.contrast * 100)}%</b><input type="range" min="0.5" max="1" step="0.05" bind:value={vs.tattoo.spread.contrast} /></label>
+        <label class="row"><span>{t('spr.blur')} {@render i('spr.blur')}</span> <b>{num(tt.spread.blurMm, 2)}</b><input type="range" min="0" max="0.5" step="0.05" bind:value={vs.tattoo.spread.blurMm} /></label>
+        <p class="muted">{t('spr.disclaimer')}</p>
       {:else}
-        {@const sk = t.skin}
+        {@const sk = tt.skin}
         <div class="row">
-          <span>Тон кожи {@render i('skin.tone')}</span>
+          <span>{t('skin.tone')} {@render i('skin.tone')}</span>
           <div class="seg">
             {#each SKIN_TONES as c, k}
-              <button class="tone" class:active={sk.tone === k} style="background: rgb({c.join(',')}); color: {k < 3 ? '#000' : '#fff'}" onclick={() => (vs.tattoo.skin.tone = k)}>{SKIN_NAMES[k]}</button>
+              <button class="tone" class:active={sk.tone === k} style="background: rgb({c.join(',')}); color: {k < 3 ? '#000' : '#fff'}" onclick={() => (vs.tattoo.skin.tone = k)} aria-label={t('skin.toneN', { n: SKIN_NAMES[k] })}>{SKIN_NAMES[k]}</button>
             {/each}
             <label class="tone" class:active={sk.tone === OWN_TONE} style="background: {hex(sk.own)}">
-              <input type="color" value={hex(sk.own).toLowerCase()} oninput={(e) => { const v = parseInt((e.currentTarget as HTMLInputElement).value.slice(1), 16); vs.tattoo.skin = { ...vs.tattoo.skin, own: [v >> 16, (v >> 8) & 255, v & 255], tone: OWN_TONE }; }} />свой
+              <input type="color" value={hex(sk.own).toLowerCase()} oninput={(e) => { const v = parseInt((e.currentTarget as HTMLInputElement).value.slice(1), 16); vs.tattoo.skin = { ...vs.tattoo.skin, own: [v >> 16, (v >> 8) & 255, v & 255], tone: OWN_TONE }; }} />{t('skin.own')}
             </label>
           </div>
         </div>
         <div class="row">
-          <span>Показать {@render i('skin.show')}</span>
+          <span>{t('skin.show')} {@render i('skin.show')}</span>
           <div class="seg">
-            {#each [['one', 'на коже'], ['compare', 'до / после'], ['all', 'все I–VI']] as [k, label]}
+            {#each [['one', t('skin.showOne')], ['compare', t('skin.showCompare')], ['all', t('skin.showAll')]] as [k, label]}
               <button class:active={sk.show === k} onclick={() => (vs.tattoo.skin.show = k as typeof sk.show)}>{label}</button>
             {/each}
           </div>
         </div>
         {#if sk.show === 'all'}
-          <p class="muted">Каждый тон со своей калибровкой. Тапни по плитке, чтобы открыть и настроить этот тон.</p>
+          <p class="muted">{t('skin.allHint')}</p>
         {:else}
-          <p class="muted">Калибровка для: {toneName(sk.tone)} {@render i('skin.cal')}</p>
-          {#each CAL as [k, label, min, max, unit]}
-            <label class="row"><span>{label} {@render i(`skin.${k}`)}</span> <b>{sk.cal[sk.tone][k]}{unit}</b><input type="range" {min} {max} bind:value={vs.tattoo.skin.cal[sk.tone][k]} /></label>
+          <p class="muted">{t('skin.calFor', { tone: toneName(sk.tone) })} {@render i('skin.cal')}</p>
+          {#each CAL as [k, key, min, max, unit]}
+            <label class="row"><span>{t(key)} {@render i(`skin.${k}`)}</span> <b>{sk.cal[sk.tone][k]}{unit}</b><input type="range" {min} {max} bind:value={vs.tattoo.skin.cal[sk.tone][k]} /></label>
           {/each}
           <div class="row">
-            <button onclick={() => (vs.tattoo.skin.cal[sk.tone] = { ...NEUTRAL })}>Сбросить калибровку</button>
-            <button onclick={exportCalibrated} disabled={!opened}>PNG версии</button>
+            <button onclick={() => (vs.tattoo.skin.cal[sk.tone] = { ...NEUTRAL })}>{t('skin.resetCal')}</button>
+            <button onclick={exportCalibrated} disabled={!opened}>{t('skin.png')}</button>
             {@render i('skin.png')}
           </div>
-          <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.skin.use} /> Работать с этой версией {@render i('skin.use')}</label>
+          <label class="row check"><input type="checkbox" bind:checked={vs.tattoo.skin.use} /> {t('skin.use')} {@render i('skin.use')}</label>
           {#if sk.use}
-            <div class="row"><button class="primary" onclick={() => (vs.tattoo.tool = 'pigments')}>Подобрать пигменты</button></div>
+            <div class="row"><button class="primary" onclick={() => (vs.tattoo.tool = 'pigments')}>{t('skin.toPigments')}</button></div>
           {/if}
         {/if}
-        <p class="muted">Тоны I–VI ориентировочные (шкала Фицпатрика). Кожа просвечивает сквозь краску, поэтому белое на тёмной коже почти пропадает. Это прикидка, не прогноз заживления.</p>
+        <p class="muted">{t('skin.disclaimer')}</p>
       {/if}
     {/if}
 
-    {#if vs.view !== 'original' && vs.view !== 'simplify' && vs.view !== 'drawing' && vs.view !== 'tattoo'}<canvas class="hist" bind:this={hcanvas}></canvas>{/if}
+    {#if vs.view !== 'original' && vs.view !== 'simplify' && vs.view !== 'drawing' && vs.view !== 'tattoo'}<canvas class="hist" bind:this={hcanvas} aria-hidden="true"></canvas>{/if}
+    {/if}
     {#if last?.stats.simplify}
       {@const s = last.stats.simplify}
-      <p class="muted">Пятен {s.regions} · цветов {s.colors}{s.inkShare ? ` · тёмных элементов ${(s.inkShare * 100).toFixed(1)}%` : ''} · {s.ms.total} мс (сегментация {s.ms.segment}, слияние {s.ms.merge}, заливка {s.ms.paint}){last.timings.computeMs ? '' : ' · из кэша'}</p>
+      <p class="muted">{t('simp.stats', { regions: s.regions, colors: s.colors })}{s.inkShare ? ` · ${t('simp.darkShare', { p: num(s.inkShare * 100) })}` : ''} · {s.ms.total} {t('unit.ms')}{last.timings.computeMs ? '' : ` · ${t('common.cached')}`}</p>
     {/if}
     {#if last?.stats.drawing}
-      <p class="muted">Линий {(last.stats.drawing.inkShare * 100).toFixed(1)}% площади · расчёт {last.timings.computeMs} мс, загрузка в GPU {last.timings.uploadMs} мс, туда-обратно {last.roundTripMs} мс</p>
+      <p class="muted">{t('draw.stats', { p: num(last.stats.drawing.inkShare * 100), ms: last.timings.computeMs })}</p>
     {/if}
     {#if last?.stats.tattoo}
       {@const ts = last.stats.tattoo}
       {#if ts.contrast}
-        <p class="muted">Цветов {ts.contrast.colors} · слабых границ {ts.contrast.weakPairs} ({Math.round(ts.contrast.weakShare * 100)}% длины всех границ) · {ts.ms} мс{last.timings.computeMs ? '' : ' · из кэша'}</p>
+        <p class="muted">{t('con.stats', { colors: ts.contrast.colors, weak: ts.contrast.weakPairs, p: Math.round(ts.contrast.weakShare * 100) })} · {ts.ms} {t('unit.ms')}{last.timings.computeMs ? '' : ` · ${t('common.cached')}`}</p>
         <div class="pairs">
           {#each ts.contrast.pairs as p}
             <div class="row" class:weak={p.weak}>
               <span class="dot" style="background: {p.a}"></span><span class="dot" style="background: {p.b}"></span>
-              <span>ΔL* {p.dL} · ΔE {p.dE} · граница {p.border}{p.colorOnColor ? ' · цвет на цвете' : ''}</span>
+              <span>ΔL* {p.dL} · ΔE {p.dE} · {t('con.border')} {p.border}{p.colorOnColor ? ` · ${t('con.colorOnColor')}` : ''}</span>
             </div>
           {/each}
         </div>
       {:else if ts.pigments && 'inks' in ts.pigments}
         {@const pr = ts.pigments}
-        <p class="muted">Средняя разница с эскизом ΔE {pr.meanDE} · кожа без краски {Math.round(pr.skinShare * 100)}% · {ts.ms} мс{last.timings.computeMs ? '' : ' · из кэша'}</p>
+        <p class="muted">{t('pig.stats', { de: pr.meanDE, skin: Math.round(pr.skinShare * 100) })} · {ts.ms} {t('unit.ms')}{last.timings.computeMs ? '' : ` · ${t('common.cached')}`}</p>
         <div class="pairs">
           {#each pr.inks as k, j}
             <div class="inkline">
-              <button class="inkrow" class:on={vs.tattoo.pigments.focus === j} onclick={() => focusPigment(j)}><span class="dot" style="background: {k.hex}"></span><span>{k.name} <span class="muted">· {k.line} · {Math.round(k.share * 100)}%{k.conf === 'm' ? '' : ' · цвет по фото флакона'}{vs.tattoo.pigments.include.includes(k.id) ? ' · выбрана тобой' : ''}</span></span></button>
-              <button class="alt" class:active={altFor === k.id} onclick={() => (altFor = altFor === k.id ? null : k.id)} aria-label="Замены">⇄</button>
+              <button class="inkrow" class:on={vs.tattoo.pigments.focus === j} onclick={() => focusPigment(j)}><span class="dot" style="background: {k.hex}"></span><span>{k.name} <span class="muted">· {k.line} · {Math.round(k.share * 100)}%{k.conf === 'm' ? '' : ` · ${t('pig.fromBottle')}`}{vs.tattoo.pigments.include.includes(k.id) ? ` · ${t('pig.yourChoice')}` : ''}</span></span></button>
+              <button class="alt" class:active={altFor === k.id} onclick={() => (altFor = altFor === k.id ? null : k.id)} aria-label={t('pig.alternatives')} title={t('pig.alternatives')}>⇄</button>
             </div>
             {#if altFor === k.id}
               {@const alt = alternatives(k.id)}
               <div class="alts">
-                <div class="row"><button onclick={() => replaceInk(k.id, null)}>Нет в наличии</button><span class="muted">подбор возьмёт другую краску сам</span></div>
-                {#each [{ title: 'Этот же бренд', list: alt.same }, { title: 'Другие бренды', list: alt.other }] as { title, list }}
+                <div class="row"><button onclick={() => replaceInk(k.id, null)}>{t('pig.outOfStock')}</button><span class="muted">{t('pig.outOfStockHint')}</span></div>
+                {#each [{ title: t('pig.sameBrand'), list: alt.same }, { title: t('pig.otherBrands'), list: alt.other }] as { title, list }}
                   <p class="muted">{title}:</p>
                   {#each list as a}
-                    <button class="inkrow" onclick={() => replaceInk(k.id, a.id)}><span class="dot" style="background: {a.hex}"></span><span>{a.name} <span class="muted">· {a.brand} · {a.line} · ΔE {a.dE}{a.conf === 'm' ? '' : ' · по фото'}</span></span></button>
+                    <button class="inkrow" onclick={() => replaceInk(k.id, a.id)}><span class="dot" style="background: {a.hex}"></span><span>{a.name} <span class="muted">· {a.brand} · {a.line} · ΔE {a.dE}{a.conf === 'm' ? '' : ` · ${t('pig.byPhoto')}`}</span></span></button>
                   {/each}
                 {/each}
               </div>
@@ -1213,17 +1383,17 @@
           {/each}
           {#if vs.tattoo.pigments.excluded.length || vs.tattoo.pigments.include.length}
             <div class="chips">
-              {#each vs.tattoo.pigments.excluded as id}<button class="chip" onclick={() => (vs.tattoo.pigments.excluded = vs.tattoo.pigments.excluded.filter((x) => x !== id))}>нет: {inkById(id)?.name ?? id} ✕</button>{/each}
-              {#each vs.tattoo.pigments.include as id}<button class="chip" onclick={() => (vs.tattoo.pigments.include = vs.tattoo.pigments.include.filter((x) => x !== id))}>своя: {inkById(id)?.name ?? id} ✕</button>{/each}
+              {#each vs.tattoo.pigments.excluded as id}<button class="chip" onclick={() => (vs.tattoo.pigments.excluded = vs.tattoo.pigments.excluded.filter((x) => x !== id))}>{t('pig.chipNo', { name: inkById(id)?.name ?? id })} ✕</button>{/each}
+              {#each vs.tattoo.pigments.include as id}<button class="chip" onclick={() => (vs.tattoo.pigments.include = vs.tattoo.pigments.include.filter((x) => x !== id))}>{t('pig.chipOwn', { name: inkById(id)?.name ?? id })} ✕</button>{/each}
             </div>
           {/if}
-          <button class="inkrow" class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)}><span class="dot" style="background: {vs.tattoo.skin.use ? `rgb(${skinRgb(vs.tattoo.skin).join(',')})` : '#F5F3EF'}"></span><span>Кожа без краски <span class="muted">· {Math.round(pr.skinShare * 100)}%</span></span></button>
+          <button class="inkrow" class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)}><span class="dot" style="background: {vs.tattoo.skin.use ? `rgb(${skinRgb(vs.tattoo.skin).join(',')})` : '#F5F3EF'}"></span><span>{t('pig.bareSkin')} <span class="muted">· {Math.round(pr.skinShare * 100)}%</span></span></button>
         </div>
         {#if pr.misses.length}
-          <p class="muted">Не попадают ни в одну краску ближе ΔE {vs.tattoo.pigments.farDE}:</p>
+          <p class="muted">{t('pig.missesTitle', { de: vs.tattoo.pigments.farDE })}</p>
           <div class="pairs">
             {#each pr.misses as m}
-              <div class="row weak"><span class="dot" style="background: {m.hex}"></span><span class="dot" style="background: {m.nearestHex}"></span><span>{Math.round(m.share * 100)}% эскиза · ближе всего {m.nearest}, ΔE {m.nearestDE}{m.usedDE > m.nearestDE + 0.5 ? ` (сейчас ΔE ${m.usedDE}: добавь краску)` : ''}</span></div>
+              <div class="row weak"><span class="dot" style="background: {m.hex}"></span><span class="dot" style="background: {m.nearestHex}"></span><span>{t('pig.miss', { p: Math.round(m.share * 100), name: m.nearest, de: m.nearestDE })}{m.usedDE > m.nearestDE + 0.5 ? ` ${t('pig.missAdd', { de: m.usedDE })}` : ''}</span></div>
             {/each}
           </div>
         {/if}
@@ -1231,22 +1401,22 @@
         {@const pr = ts.pigments}
         <div class="levels">
           {#each pr.tones as L, k}<button class:on={vs.tattoo.pigments.focus === k} onclick={() => focusPigment(k)} style="background: rgb({labToSrgb(L, 0, 0).join(',')}); color: {L > 55 ? '#000' : '#fff'}">{Math.round(pr.shares[k] * 100)}%</button>{/each}
-          <button class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)} style="background: #fff; color: #000">кожа {Math.round(pr.skinShare * 100)}%</button>
+          <button class:on={vs.tattoo.pigments.focus === -2} onclick={() => focusPigment(-2)} style="background: #fff; color: #000">{t('pig.skinShort')} {Math.round(pr.skinShare * 100)}%</button>
         </div>
-        <p class="muted">Тапни по тону, чтобы увидеть, где он. Пипетка по эскизу покажет светлоту точки и ближайший тон.</p>
-        <p class="muted">Кожа без краски {Math.round(pr.skinShare * 100)}% · {ts.ms} мс</p>
+        <p class="muted">{t('pig.bgHint')}</p>
+        <p class="muted">{t('pig.bareSkin')} {Math.round(pr.skinShare * 100)}% · {ts.ms} {t('unit.ms')}</p>
       {:else if ts.lines}
-        <p class="muted">{ts.lines.pxPerMm} px/мм · линий {(ts.lines.inkShare * 100).toFixed(1)}% · тонких {(ts.lines.thinShare * 100).toFixed(1)}% линий · узких зазоров {(ts.lines.gapShare * 100).toFixed(1)}% площади · {ts.ms} мс</p>
-        {#if ts.lines.inkShare < 0.005}<p class="error">Линией почти ничего не считается ({(ts.lines.inkShare * 100).toFixed(1)}%). Подними «Линия темнее L*» или нажми «Сбросить».</p>{/if}
-        {#if ts.lines.lowResolution}<p class="error">Разрешения мало: минимальная линия меньше 2 px. Уменьши ширину тату или открой фото крупнее.</p>{/if}
+        <p class="muted">{t('lin.stats', { ppm: ts.lines.pxPerMm, ink: num(ts.lines.inkShare * 100), thin: num(ts.lines.thinShare * 100), gap: num(ts.lines.gapShare * 100) })} · {ts.ms} {t('unit.ms')}</p>
+        {#if ts.lines.inkShare < 0.005}<p class="error">{t('lin.noInk', { p: num(ts.lines.inkShare * 100) })}</p>{/if}
+        {#if ts.lines.lowResolution}<p class="error">{t('lin.lowRes')}</p>{/if}
       {:else if ts.distance}
         {@const f = ts.distance.figure}
-        <p class="muted">Размытие {ts.distance.blurPx} px · Notan совпадает на {Math.round(ts.distance.iou * 100)}% (IoU) · {ts.ms} мс</p>
-        <p class="muted">Фигура/фон: тёмного {Math.round(f.darkShare * 100)}%, крупных тёмных пятен {f.bigDark}, главное пятно {Math.round(f.dominant * 100)}% тёмного</p>
+        <p class="muted">{t('dist.stats', { px: ts.distance.blurPx, iou: Math.round(ts.distance.iou * 100) })} · {ts.ms} {t('unit.ms')}</p>
+        <p class="muted">{t('dist.figure', { dark: Math.round(f.darkShare * 100), big: f.bigDark, main: Math.round(f.dominant * 100) })}</p>
       {:else if ts.spread}
-        <p class="muted">Растекание {ts.spread.spreadPx} px · размытие {ts.spread.blurPx} px · {ts.ms} мс</p>
+        <p class="muted">{t('spr.stats', { s: ts.spread.spreadPx, b: ts.spread.blurPx })} · {ts.ms} {t('unit.ms')}</p>
       {:else}
-        <p class="muted">{ts.ms} мс</p>
+        <p class="muted">{ts.ms} {t('unit.ms')}</p>
       {/if}
     {/if}
     {#if last?.stats.values}
@@ -1257,27 +1427,61 @@
       </div>
     {/if}
     {#if last?.stats.notan}
-      <p class="muted">Порог: {last.stats.notan.modeUsed === 'otsu' ? 'Otsu' : 'медиана'} · тёмного {Math.round(last.stats.notan.share[0] * 100)}%</p>
+      <p class="muted">{t('notan.stats', { mode: last.stats.notan.modeUsed === 'otsu' ? 'Otsu' : t('notan.median'), p: Math.round(last.stats.notan.share[0] * 100) })}</p>
     {/if}
     {#if last?.stats.highlight && vs.highlight.target}
-      <p class="muted">В допуске {(last.stats.highlight.share * 100).toFixed(1)}% фото · гистограмма ΔE до цвета 0…100</p>
+      <p class="muted">{t('hl.stats', { p: num(last.stats.highlight.share * 100) })}</p>
     {/if}
     {#if last?.stats.temperature}
-      <p class="muted">Тёплого {Math.round(last.stats.temperature.warmShare * 100)}% · нейтраль {last.stats.temperature.neutral.toFixed(1)} · разброс {last.stats.temperature.spread}</p>
+      <p class="muted">{t('temp.stats', { p: Math.round(last.stats.temperature.warmShare * 100), n: num(last.stats.temperature.neutral), s: last.stats.temperature.spread })}</p>
+    {/if}
+
+    {#if opened}
+      <details class="common" bind:open={gridOpen}>
+        <summary>{t('grid.title')}{grid.on ? ` · ${t('grid.on')}` : ''}</summary>
+        <label class="row check"><input type="checkbox" bind:checked={grid.on} /> {t('grid.show')} {@render i('grid')}</label>
+        <div class="row">
+          <span>{t('grid.cells')}</span>
+          <div class="seg">
+            <button class:active={grid.mode === 'cells' && grid.square} onclick={() => { grid.mode = 'cells'; grid.square = true; }}>{t('grid.square')}</button>
+            <button class:active={grid.mode === 'cells' && !grid.square} onclick={() => { grid.mode = 'cells'; grid.square = false; }}>{t('grid.rowsCols')}</button>
+            <button class:active={grid.mode === 'cm'} onclick={() => (grid.mode = 'cm')}>{t('grid.cm')}</button>
+          </div>
+        </div>
+        {#if grid.mode === 'cells'}
+          <label class="row"><span>{t('grid.cols')}</span> <b>{grid.cols}</b><input type="range" min="2" max="24" bind:value={grid.cols} /></label>
+          {#if !grid.square}<label class="row"><span>{t('grid.rows')}</span> <b>{grid.rows}</b><input type="range" min="2" max="24" bind:value={grid.rows} /></label>{/if}
+        {:else}
+          <label class="row"><span>{t('grid.cellCm')}</span> <b>{num(grid.cellCm)}</b><input type="range" min="0.5" max="5" step="0.5" bind:value={grid.cellCm} /></label>
+          <label class="row"><span>{t('tat.width')} {@render i('tat.width')}</span> <b>{num(vs.tattoo.widthCm)}</b><input type="range" min="2" max="40" step="0.5" bind:value={vs.tattoo.widthCm} /></label>
+        {/if}
+        <label class="row"><span>{t('grid.sub')}</span> <b>{grid.sub > 1 ? grid.sub : t('common.none')}</b><input type="range" min="1" max="4" bind:value={grid.sub} /></label>
+        <label class="row check"><input type="checkbox" bind:checked={grid.diagonals} /> {t('grid.diagonals')}</label>
+        <div class="row">
+          <span>{t('grid.color')}</span>
+          <div class="seg">
+            {#each [['white', t('grid.white')], ['black', t('grid.black')], ['accent', t('grid.orange')]] as [c, label]}
+              <button class:active={grid.color === c} onclick={() => (grid.color = c as GridColor)}>{label}</button>
+            {/each}
+          </div>
+        </div>
+        <label class="row"><span>{t('grid.opacity')}</span> <b>{Math.round(grid.opacity * 100)}%</b><input type="range" min="0.2" max="1" step="0.05" bind:value={grid.opacity} /></label>
+        <label class="row check"><input type="checkbox" bind:checked={grid.inExport} /> {t('grid.inExport')}</label>
+      </details>
     {/if}
     <details class="common">
-      <summary>Общие настройки</summary>
+      <summary>{t('common.settings')}</summary>
       <div class="row">
-        <span>Сглаживание {@render i('smoothing')}</span>
+        <span>{t('smoothing.title')} {@render i('smoothing')}</span>
         <div class="seg">
-          {#each [[0, 'нет'], [1, 'слабое'], [2, 'сильное']] as [v, label]}
+          {#each [[0, t('smoothing.none')], [1, t('smoothing.weak')], [2, t('smoothing.strong')]] as [v, label]}
             <button class:active={vs.smoothing === v} onclick={() => (vs.smoothing = v as 0 | 1 | 2)}>{label}</button>
           {/each}
         </div>
       </div>
       {#if tool === 'pipette'}
         <div class="row">
-          <span>Размер пробы {@render i('sampleSize')}</span>
+          <span>{t('sample.size')} {@render i('sampleSize')}</span>
           <div class="seg">
             {#each SIZES as n}<button class:active={sampleSize === n} onclick={() => (sampleSize = n)}>{n === 1 ? '1 px' : `${n}×${n}`}</button>{/each}
           </div>
@@ -1288,28 +1492,28 @@
 
   {#if section === 'palette'}
   <section class="card controls">
-    <h2>Палитра</h2>
-    <label class="row"><span>Краски {@render i('artPaints')}</span>
+    <h2>{t('tab.palette')}</h2>
+    <label class="row"><span>{t('art.paints')} {@render i('artPaints')}</span>
       <select value={artSet.type} onchange={(e) => chooseArtType((e.currentTarget as HTMLSelectElement).value)}>
-        <option value="">не подбирать</option>
-        {#each [['acrylic', 'Акрил'], ['oil', 'Масло'], ['water-mixable-oil', 'Водорастворимое масло'], ['watercolor', 'Акварель'], ['gouache', 'Гуашь'], ['acrylic-gouache', 'Акриловая гуашь'], ['soft-pastel', 'Сухая пастель'], ['alcohol-marker', 'Спиртовые маркеры'], ['colored-pencil', 'Цветные карандаши']] as [v, label]}<option value={v}>{label}</option>{/each}
+        <option value="">{t('art.none')}</option>
+        {#each ART_TYPES as [v, key]}<option value={v}>{t(key)}</option>{/each}
       </select>
     </label>
     {#if artErr}<p class="error">{artErr}</p>{/if}
-    {#if artSet.type && !artCat && !artErr}<p class="muted">Загружаю каталог красок…</p>{/if}
+    {#if artSet.type && !artCat && !artErr}<p class="muted">{t('art.loading')}</p>{/if}
     {#if artOn}
-      <label class="row"><span>Бренд</span>
+      <label class="row"><span>{t('pig.brand')}</span>
         <select bind:value={artSet.brand}>
-          <option value="">все бренды</option>
+          <option value="">{t('common.allBrands')}</option>
           {#each artBrands as b}<option value={b}>{b}</option>{/each}
         </select>
       </label>
       {#if ['oil', 'acrylic', 'watercolor', 'water-mixable-oil'].includes(artSet.type)}
         <div class="row">
-          <span>Сравнивать {@render i('artTint')}</span>
+          <span>{t('art.compare')} {@render i('artTint')}</span>
           <div class="seg">
-            <button class:active={!artSet.tint} onclick={() => (artSet.tint = false)}>{artSet.type === 'watercolor' ? 'плотная заливка' : 'масстон'}</button>
-            <button class:active={artSet.tint} onclick={() => (artSet.tint = true)}>{artSet.type === 'watercolor' ? 'лессировка' : 'разбел'}</button>
+            <button class:active={!artSet.tint} onclick={() => (artSet.tint = false)}>{artSet.type === 'watercolor' ? t('art.fullWash') : t('art.masstone')}</button>
+            <button class:active={artSet.tint} onclick={() => (artSet.tint = true)}>{artSet.type === 'watercolor' ? t('art.glaze') : t('art.tint')}</button>
           </div>
         </div>
       {/if}
@@ -1317,11 +1521,11 @@
     <label class="row"><span>Dominant {@render i('pal.dominant')}</span> <b>{pparams.dominant}</b><input type="range" min="3" max="12" bind:value={pparams.dominant} /></label>
     <label class="row"><span>Range {@render i('pal.range')}</span> <b>{pparams.range}</b><input type="range" min="3" max="12" bind:value={pparams.range} /></label>
     <label class="row"><span>Accents {@render i('pal.accents')}</span> <b>{pparams.accents}</b><input type="range" min="0" max="12" bind:value={pparams.accents} /></label>
-    <label class="row"><span>Слияние ΔE {@render i('pal.merge')}</span> <b>{pparams.mergeDE}</b><input type="range" min="0" max="20" bind:value={pparams.mergeDE} /></label>
+    <label class="row"><span>{t('pal.merge')} {@render i('pal.merge')}</span> <b>{pparams.mergeDE}</b><input type="range" min="0" max="20" bind:value={pparams.mergeDE} /></label>
     <div class="row">
-      <button class="primary" onclick={runPalette} disabled={!opened || !!busy}>Извлечь палитру</button>
+      <button class="primary" onclick={runPalette} disabled={!opened || !!busy}>{t('pal.extract')}</button>
       {#if palette}<button onclick={exportCsv}>CSV</button>{/if}
-      <label class="check"><input type="checkbox" bind:checked={showMarkers} /> маркеры на фото {@render i('pal.markers')}</label>
+      <label class="check"><input type="checkbox" bind:checked={showMarkers} /> {t('pal.markers')} {@render i('pal.markers')}</label>
     </div>
     {#if palette}
       <div class="seg">
@@ -1329,48 +1533,48 @@
       </div>
       <div class="swatches">
         {#each swatches as s, i}
-          <button style="background: {s.hex}; color: {s.lab[0] > 55 ? '#000' : '#fff'}" onclick={() => selectSwatch(s, `${pkind} ${i + 1}`)}>
-            {i + 1}<small>{pkind === 'range' ? `L* ${Math.round(s.lab[0])}` : `${(s.share * 100).toFixed(1)}%`}</small>
+          <button style="background: {s.hex}; color: {s.lab[0] > 55 ? '#000' : '#fff'}" onclick={() => selectSwatch(s, `${pkind} ${i + 1}`)} aria-label={`${pkind} ${i + 1}: ${s.hex}`}>
+            {i + 1}<small>{pkind === 'range' ? `L* ${Math.round(s.lab[0])}` : `${num(s.share * 100)}%`}</small>
           </button>
         {/each}
       </div>
       {#if artOn && swatches.length}
-        <p class="muted">Ближайшая краска к каждому образцу. ⇄ покажет замены, если такой краски нет.</p>
+        <p class="muted">{t('art.nearestHint')}</p>
         {#each swatches as s, i}
           {@const m = nearestPaints(artCat!, artSet, s.lab, 1)[0]}
           {#if m}{@render paintRow(m.paint, m.dE, `${i + 1}`, s.hex)}{/if}
         {/each}
       {/if}
-      {#if !swatches.length}<p class="muted">Акцентов нет: насыщенных цветов вдали от основных не нашлось.</p>{/if}
-      <p class="muted">Всего {palette.totalMs} мс: чтение пикселей {palette.readMs}, сетка {palette.gridMs}, извлечение {palette.ms}. Тап по образцу открывает карточку цвета.</p>
+      {#if !swatches.length}<p class="muted">{t('pal.noAccents')}</p>{/if}
+      <p class="muted">{t('pal.timing', { ms: palette.totalMs })}</p>
     {/if}
   </section>
   {/if}
 
   {#if current && tool === 'pipette'}
     {@const c = current.info}
-    <section class="card">
-      <h2>Цвет</h2>
+    <section class="card" aria-live="polite">
+      <h2>{t('card.title')}</h2>
       <div class="colorhead">
         <span class="big" style="background: {c.codes.HEX}"></span>
         <div>
-          <b>{c.name}</b> · {c.temperature.label}
+          <b>{colorLabel(c)}</b> · {t(TEMP_KEY[c.temperature.label] ?? 'temp.neutral')}
           <p class="muted">{current.from}</p>
-          <p class="muted">Value (L*) {c.value} · тон {c.hue}° · хрома {c.chroma} · насыщенность {c.saturation}% · тепло {c.temperature.warmth}</p>
+          <p class="muted">{t('card.attrs', { v: num(c.value), h: c.hue, c: num(c.chroma), s: c.saturation, w: num(c.temperature.warmth) })}</p>
         </div>
       </div>
       <div class="codes">
         {#each Object.entries(c.codes) as [k, v]}
-          <button onclick={() => copyCode(k, v)}><span>{k}</span>{copiedCode === k ? 'скопировано' : v}</button>
+          <button onclick={() => copyCode(k, v)}><span>{k}</span>{copiedCode === k ? t('common.copied') : v}</button>
         {/each}
       </div>
       <div class="row">
         <span class="dot" style="background: {hex(c.complementary)}"></span>
-        <span class="muted">Дополнительный {hex(c.complementary)}</span>
+        <span class="muted">{t('card.complementary')} {hex(c.complementary)}</span>
       </div>
       <div class="row">
-        <button onclick={() => (compareA = c)}>Запомнить как A</button>
-        <button class="primary" onclick={() => findOnPhoto(c)}>Найти на фото</button>
+        <button onclick={() => (compareA = c)}>{t('card.rememberA')}</button>
+        <button class="primary" onclick={() => findOnPhoto(c)}>{t('card.find')}</button>
       </div>
       {#if inkPipette}
         {@const pg = vs.tattoo.pigments}
@@ -1378,49 +1582,52 @@
         {@const set = tp && 'inks' in tp ? tp.inks : []}
         {#if pg.mode === 'bg'}
           {@const k = pg.tonesL.reduce((b, L, j) => (Math.abs(L - c.lab[0]) < Math.abs(pg.tonesL[b] - c.lab[0]) ? j : b), 0)}
-          <p class="muted">Светлота L* {Math.round(c.lab[0])}: ближе всего {pg.series >= 0 ? GREY_SERIES[pg.series].names[k] : `тон ${k + 1}`} (L* {pg.tonesL[k]}).</p>
+          <p class="muted">{t('card.bgNearest', { L: Math.round(c.lab[0]), tone: pg.series >= 0 ? GREY_SERIES[pg.series].names[k] : t('pig.toneN', { n: k + 1 }).toLowerCase(), tl: pg.tonesL[k] })}</p>
         {:else}
           {@const rec = inkRecipe(c.rgb, set.map((k) => k.id))}
           {#if rec}
-            <p class="muted">Из красок на эскизе (ΔE {rec.dE}):</p>
-            <div class="row"><span class="dot" style="background: {rec.hex}"></span><span>{rec.inks.length ? rec.inks.map((k) => `${k.name} ${k.pct}%`).join(' + ') : 'кожа без краски'}</span></div>
+            <p class="muted">{t('card.recipe', { de: rec.dE })}</p>
+            <div class="row"><span class="dot" style="background: {rec.hex}"></span><span>{rec.inks.length ? rec.inks.map((k) => `${k.name} ${k.pct}%`).join(' + ') : t('pig.bareSkin').toLowerCase()}</span></div>
             {#each rec.inks as k}
               {@const j = set.findIndex((s) => s.id === k.id)}
-              {#if j >= 0}<button class="inkrow" class:on={pg.focus === j} onclick={() => focusPigment(j)}><span class="dot" style="background: {k.hex}"></span><span>Показать {k.name} на эскизе</span></button>{/if}
+              {#if j >= 0}<button class="inkrow" class:on={pg.focus === j} onclick={() => focusPigment(j)}><span class="dot" style="background: {k.hex}"></span><span>{t('card.showInk', { name: k.name })}</span></button>{/if}
             {/each}
           {/if}
-          <p class="muted">Ближайшие краски {pg.brand || 'всех брендов'}:</p>
+          <p class="muted">{t('card.nearestInks', { brand: pg.brand || t('common.allBrands') })}</p>
           {#each nearestInks(c.lab, pg.brand, 5, pg.excluded) as a}
             {@const inSet = set.some((k) => k.id === a.id)}
             <div class="inkline">
-              <span class="inkrow"><span class="dot" style="background: {a.hex}"></span><span>{a.name} <span class="muted">· {a.line} · ΔE {a.dE}{a.conf === 'm' ? '' : ' · по фото'}{inSet ? ' · уже на эскизе' : ''}</span></span></span>
-              {#if !inSet}<button class="alt" onclick={() => (vs.tattoo.pigments = { ...pg, focus: -1, include: [...new Set([...pg.include, a.id])] })} aria-label="Добавить в набор">+</button>{/if}
+              <span class="inkrow"><span class="dot" style="background: {a.hex}"></span><span>{a.name} <span class="muted">· {a.line} · ΔE {a.dE}{a.conf === 'm' ? '' : ` · ${t('pig.byPhoto')}`}{inSet ? ` · ${t('card.inSet')}` : ''}</span></span></span>
+              {#if !inSet}<button class="alt" onclick={() => (vs.tattoo.pigments = { ...pg, focus: -1, include: [...new Set([...pg.include, a.id])] })} aria-label={t('card.addToSet')} title={t('card.addToSet')}>+</button>{/if}
             </div>
           {/each}
         {/if}
       {:else if artOn}
-        <p class="muted">Ближайшие краски набора:</p>
+        <p class="muted">{t('card.nearestPaints')}</p>
         {#each nearestPaints(artCat!, artSet, c.lab, 3) as m}{@render paintRow(m.paint, m.dE)}{/each}
       {:else}
-        <p class="muted">Выбери краски во вкладке «Палитра», и здесь появятся ближайшие из набора.</p>
+        <p class="muted">{t('card.choosePaints')}</p>
       {/if}
       {#if compareA}
         {@const d = compareColors(compareA.rgb, c.rgb)}
         <div class="row">
           <span class="dot" style="background: {compareA.codes.HEX}"></span> A → B <span class="dot" style="background: {c.codes.HEX}"></span>
-          <span class="muted">ΔE2000 {d.dE2000} · Value {d.dValue > 0 ? '+' : ''}{d.dValue} · тепло {d.dWarmth > 0 ? '+' : ''}{d.dWarmth} · тон {d.dHue > 0 ? '+' : ''}{d.dHue}° · хрома {d.dChroma > 0 ? '+' : ''}{d.dChroma}</span>
+          <span class="muted">ΔE2000 {num(d.dE2000)} · Value {d.dValue > 0 ? '+' : ''}{num(d.dValue)} · {t('card.warmth')} {d.dWarmth > 0 ? '+' : ''}{num(d.dWarmth)} · {t('card.hue')} {d.dHue > 0 ? '+' : ''}{d.dHue}° · {t('card.chroma')} {d.dChroma > 0 ? '+' : ''}{num(d.dChroma)}</span>
         </div>
       {/if}
     </section>
   {/if}
 
+  {#if debug}
   <details class="card diag">
-    <summary>Диагностика: цели этапов, сверка GPU и CPU</summary>
+    <summary>{t('diag.title')}</summary>
+    <p class="muted">{t('diag.lead')}</p>
   <section>
     <h2>Этап 5: проекты, экспорт, офлайн</h2>
     <ul class="targets">
       <li class={ok(swInfo?.version === VERSION)}>Офлайн: {swInfo ? `Service Worker ${swInfo.version}, в кэше ${swInfo.precached} файлов${swInfo.version === VERSION ? '' : ' (старая версия, перезапусти страницу)'}` : 'Service Worker не активен'}</li>
       <li class={ok(!!storage?.persisted)}>Хранилище: {storage ? `${storage.kind === 'opfs' ? 'OPFS' : 'IndexedDB'}, ${storage.persisted ? 'persist() разрешён' : 'persist() не разрешён'}` : '—'}</li>
+      <li class={ok(!!fullLog && !fullLog.notes.length)}>PNG в полном размере: {fullLog ? `${fullLog.width}×${fullLog.height} из ${fullLog.sourceWidth}×${fullLog.sourceHeight}, ${fullLog.tiles} тайлов по ${fullLog.tile}, декод ${fullLog.ms.decode} мс, рендер ${fullLog.ms.render}, сжатие ${fullLog.ms.encode}, всего ${fullLog.ms.total}${fullLog.notes.length ? ' · ' + fullLog.notes.join('; ') : ''}` : 'открой 48 МП и нажми ⤓ PNG в Values'}</li>
       <li class={ok(!!net && !net.external.length && !net.bodies && !net.images.length)}>Сеть: {net ? `${net.total} запросов, к чужим доменам ${net.external.length}, с отправкой данных ${net.bodies}, с фото не из тестовых ${net.images.length}` : 'нажми «Проверить сеть»'}</li>
     </ul>
     <div class="row"><button onclick={auditNetwork}>Проверить сеть</button><button onclick={refreshProjects}>Обновить хранилище</button></div>
@@ -1430,8 +1637,8 @@
     <h2>Этап 4: тату-инструменты</h2>
     {#if opened}
       <ul class="targets">
-        {#each TOOLS.filter(([k]) => k !== 'design') as [k, label]}
-          <li class={ok(!!tattooLog[k])}>{label}: {tattooLog[k] ? `${tattooLog[k].ms} мс на ${tattooLog[k].work}` : 'открой во вкладке Тату'}</li>
+        {#each TOOLS.filter(([k]) => k !== 'design') as [k, key]}
+          <li class={ok(!!tattooLog[k])}>{t(key)}: {tattooLog[k] ? `${tattooLog[k].ms} мс на ${tattooLog[k].work}` : 'открой во вкладке Тату'}</li>
         {/each}
         <li class={ok(!!stencilInfo)}>Трафарет PDF: {stencilInfo ? `${stencilInfo.designMm[0]}×${stencilInfo.designMm[1]} мм; распечатай в 100 % и сверь линейку` : 'Тату → Линии → «Трафарет PDF 1:1»'}</li>
       </ul>
@@ -1440,7 +1647,6 @@
       <p class="muted">Открой эскиз.</p>
     {/if}
   </section>
-
   <section>
     <h2>Цели этапа 3</h2>
     {#if opened}
@@ -1534,19 +1740,50 @@
     {/if}
   </section>
 
-  </details>
 
-  <section class="card actions">
+  <section class="actions">
     <button class="primary" onclick={shareReport}>Поделиться отчётом</button>
     <button onclick={copyReport}>{copied || 'Копировать JSON'}</button>
     <button onclick={exportPng} disabled={!opened}>PNG рабочей копии</button>
   </section>
   {#if engine}<p class="sub">GPU: {engine.caps.renderer} · MAX_TEXTURE_SIZE {engine.caps.maxTextureSize} · вывод: {engine.caps.present === 'canvas' ? 'canvas в Worker' : 'ImageBitmap'}</p>{/if}
-  {#if hint && HINTS[hint]}
-    <div class="sheet" role="dialog" aria-label={HINTS[hint][0]}>
-      <b>{HINTS[hint][0]}</b>
-      <p>{HINTS[hint][1]}</p>
-      <button onclick={() => (hint = null)}>Понятно</button>
+  </details>
+  {/if}
+
+  <footer>
+    <span>{t('footer.offline')}</span>
+    <span>{VERSION}</span>
+    <button class="link" onclick={toggleDebug} aria-pressed={debug}>{debug ? t('diag.hide') : t('diag.show')}</button>
+  </footer>
+
+  {#if hint && hints[hint]}
+    <div class="sheet" role="dialog" aria-label={hints[hint][0]}>
+      <b>{hints[hint][0]}</b>
+      <p>{hints[hint][1]}</p>
+      <button onclick={() => (hint = null)}>{t('common.gotIt')}</button>
+    </div>
+  {/if}
+
+  {#if intro}
+    {@const steps = [['intro.1.title', 'intro.1.text'], ['intro.2.title', 'intro.2.text'], ['intro.3.title', 'intro.3.text']] as Array<[Key, Key]>}
+    <div class="scrim" role="presentation" onclick={closeIntro}></div>
+    <div class="sheet intro" role="dialog" aria-modal="true" aria-labelledby="intro-title">
+      <div class="seg lang" role="group" aria-label={t('lang.label')}>
+        {#each LANGS as [l, name]}
+          <button class:active={i18n.lang === l} aria-pressed={i18n.lang === l} lang={l} onclick={() => setLang(l)}>{name}</button>
+        {/each}
+      </div>
+      <p class="step">{introStep + 1} / {steps.length}</p>
+      <b id="intro-title">{t(steps[introStep][0])}</b>
+      <p>{t(steps[introStep][1])}</p>
+      <div class="row">
+        <button onclick={closeIntro}>{t('intro.skip')}</button>
+        {#if introStep < steps.length - 1}
+          <button class="primary" onclick={() => introStep++}>{t('intro.next')}</button>
+        {:else}
+          <button class="primary" onclick={closeIntro}>{t('intro.start')}</button>
+        {/if}
+      </div>
     </div>
   {/if}
 </main>
@@ -1558,19 +1795,19 @@
       <span class="dot" style="background: {artSet.tint && p.tint ? p.tint.hex : p.hex}"></span>
       <span>{p.name}{p.code ? ` (${p.code})` : ''} <span class="muted">· {p.brand} · {p.line} · ΔE {dE}{p.pigmentKey ? ` · ${p.pigmentKey.replaceAll('+', ', ')}` : ''}</span></span>
     </div>
-    <button class="alt" class:active={artAlt === p.id} onclick={() => (artAlt = artAlt === p.id ? null : p.id)} aria-label="Замены">⇄</button>
+    <button class="alt" class:active={artAlt === p.id} onclick={() => (artAlt = artAlt === p.id ? null : p.id)} aria-label={t('pig.alternatives')} title={t('pig.alternatives')}>⇄</button>
   </div>
   {#if artAlt === p.id && artCat}
     <div class="alts">
       {#each paintAlternatives(artCat, p, artSet.tint) as a}
-        <div class="inkrow"><span class="dot" style="background: {artSet.tint && a.paint.tint ? a.paint.tint.hex : a.paint.hex}"></span><span>{a.paint.name} <span class="muted">· {a.paint.brand} · {a.paint.line} · {a.why} · ΔE {a.dE}</span></span></div>
+        <div class="inkrow"><span class="dot" style="background: {artSet.tint && a.paint.tint ? a.paint.tint.hex : a.paint.hex}"></span><span>{a.paint.name} <span class="muted">· {a.paint.brand} · {a.paint.line} · {a.why && WHY_KEY[a.why] ? t(WHY_KEY[a.why]) : a.why} · ΔE {a.dE}</span></span></div>
       {/each}
     </div>
   {/if}
 {/snippet}
 
 {#snippet i(key: string)}
-  <span class="i" role="button" tabindex="0" aria-label="Что это"
+  <span class="i" role="button" tabindex="0" aria-label={hints[key]?.[0] ? `${t('common.whatIs')}: ${hints[key][0]}` : t('common.whatIs')}
     onclick={(e) => { e.preventDefault(); e.stopPropagation(); hint = hint === key ? null : key; }}
     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); hint = hint === key ? null : key; } }}>i</span>
 {/snippet}
@@ -1731,5 +1968,35 @@
   li.pass::before { content: '✓'; }
   li.fail::before { content: '✕'; }
   .error { color: var(--bad); font-size: 13px; }
-  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
+  .cover { position: absolute; inset: 0; background: var(--stage); pointer-events: none; }
+  .stage:has(.cover) { height: 140px; }
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .top { display: flex; align-items: center; gap: 8px; }
+  .brand { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+  .brand img { border-radius: 7px; flex: none; }
+  .brand h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 18px; }
+  .lang button { font-size: 12px; padding: 4px 8px; }
+  .round { width: 32px; height: 32px; border-radius: 50%; padding: 0; font-weight: 700; flex: none; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 0 16px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--fg); font-weight: 600; cursor: pointer;
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.small { min-height: 34px; padding: 0 12px; font-size: 14px; }
+  .btn:focus-within, label.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .start .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+  .start h2 { font-size: 18px; }
+  .label { font-size: 13px; font-weight: 600; margin: 12px 0 0; }
+  .openbar { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+  .openbar .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0; }
+  footer { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; color: var(--muted); font-size: 12px; margin-top: 16px; }
+  .link { border: none; background: none; color: var(--accent); padding: 0; font-size: 12px; text-decoration: underline; }
+  .scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 9; }
+  .intro { z-index: 11; }
+  .intro .step { color: var(--muted); font-size: 12px; margin: 10px 0 2px; }
+  .intro .row { display: flex; justify-content: flex-end; gap: 8px; }
+  .overlay.grid line { filter: none; opacity: 1; }
+  .chain button.active { background: var(--fg); color: var(--bg); }
+  button:focus-visible, .i:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>

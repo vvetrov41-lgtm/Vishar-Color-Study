@@ -1,7 +1,7 @@
 {
-  "name": "Vishar Engine",
+  "name": "Vishar Color Study",
   "short_name": "Vishar",
-  "lang": "ru",
+  "description": "Colour and value study for artists and tattooers. Works offline.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

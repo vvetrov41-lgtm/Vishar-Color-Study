@@ -62,8 +62,7 @@ out vec4 outColor;
 void main() {
   vec4 acc = vec4(0.0);
   float ws = 0.0;
-  for (int i = -32; i <= 32; i++) {
-    if (i < -uRadius || i > uRadius) continue;
+  for (int i = -uRadius; i <= uRadius; i++) {
     float w = exp(-float(i * i) / (2.0 * uSigma * uSigma));
     acc += w * texture(uSrc, vUv + uStep * float(i));
     ws += w;
@@ -93,6 +92,7 @@ uniform vec3 uHlTarget;
 uniform float uHlTol;
 uniform int uHlMode;        // 0 highlight, 1 outline
 uniform vec2 uStep;         // outline neighbour step in uv; also the dash pixel size
+uniform vec2 uOrigin;       // pixel offset of this output in the full frame (export tiles), keeps dashes continuous
 uniform vec4 uRect;         // image rect in output space, top-left origin: x, y, w, h
 uniform bool uFlip;
 uniform vec4 uBg;
@@ -169,7 +169,7 @@ void main() {
         if (!m) o = labToSrgb(vec3(lab.x, 0.0, 0.0)) * FADE_KEEP + FADE_TO * (1.0 - FADE_KEEP);
       } else if (m && (!matchAt(uv - vec2(uStep.x, 0.0)) || !matchAt(uv + vec2(uStep.x, 0.0))
           || !matchAt(uv - vec2(0.0, uStep.y)) || !matchAt(uv + vec2(0.0, uStep.y)))) {
-        ivec2 ip = ivec2(floor(uv / uStep));
+        ivec2 ip = ivec2(floor(uv / uStep + uOrigin));
         o = vec3(((ip.x + ip.y) / 4) % 2 == 1 ? 0.0 : 1.0);
       }
     } else if (uView == 1) {
