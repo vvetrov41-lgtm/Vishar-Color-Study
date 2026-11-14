@@ -82,7 +82,9 @@
   let debug = $state(params.get('debug') === '1' || lsGet('vishar.debug') === '1');
   function toggleDebug() { debug = !debug; lsSet('vishar.debug', debug ? '1' : null); }
 
-  // First-run introduction: three short steps, shown once.
+  // Opened from the home screen already: the install step has nothing to say.
+  const installed = matchMedia('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+  // First-run introduction: three short steps and, in the browser, how to install, shown once.
   let intro = $state(params.get('intro') !== '0' && lsGet('vishar.intro') !== '1');
   let introStep = $state(0);
   function closeIntro() { intro = false; introStep = 0; lsSet('vishar.intro', '1'); }
@@ -1875,7 +1877,7 @@
   {/if}
 
   {#if intro}
-    {@const steps = [['intro.1.title', 'intro.1.text'], ['intro.2.title', 'intro.2.text'], ['intro.3.title', 'intro.3.text']] as Array<[Key, Key]>}
+    {@const steps = [['intro.1.title', 'intro.1.text'], ['intro.2.title', 'intro.2.text'], ['intro.3.title', 'intro.3.text'], ...(installed ? [] : [['intro.4.title', 'intro.4.text']])] as Array<[Key, Key]>}
     <div class="scrim" role="presentation" onclick={closeIntro}></div>
     <div class="sheet intro" role="dialog" aria-modal="true" aria-labelledby="intro-title">
       <div class="seg lang" role="group" aria-label={t('lang.label')}>
@@ -1886,6 +1888,14 @@
       <p class="step">{introStep + 1} / {steps.length}</p>
       <b id="intro-title">{t(steps[introStep][0])}</b>
       <p>{t(steps[introStep][1])}</p>
+      {#if steps[introStep][0] === 'intro.4.title'}
+        <p class="install">
+          <svg class="share" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3M8 7l4-4 4 4M6 11H5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1h-1" /></svg>
+          <span>{t('intro.4.ios')}</span>
+        </p>
+        <p class="install"><span class="dots" aria-hidden="true">⋮</span><span>{t('intro.4.android')}</span></p>
+        <p class="muted">{t('intro.4.browser')}</p>
+      {/if}
       <div class="row">
         <button onclick={closeIntro}>{t('intro.skip')}</button>
         {#if introStep < steps.length - 1}
@@ -2126,6 +2136,8 @@
   .link { border: none; background: none; color: var(--accent); padding: 0; font-size: 12px; text-decoration: underline; }
   .scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 9; }
   .intro { z-index: 11; }
+  .intro .install { display: flex; gap: 10px; align-items: flex-start; margin: 6px 0; }
+  .intro .install .share, .intro .install .dots { flex: none; width: 22px; text-align: center; font-size: 22px; line-height: 1; color: var(--accent); }
   .intro .step { color: var(--muted); font-size: 12px; margin: 10px 0 2px; }
   .intro .row { display: flex; justify-content: flex-end; gap: 8px; }
   .overlay.grid line { filter: none; opacity: 1; }

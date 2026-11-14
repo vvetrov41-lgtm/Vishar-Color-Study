@@ -52,12 +52,18 @@ try {
     const htmlLang = await page.evaluate(() => document.documentElement.lang);
     check(htmlLang === lang, `${lang}: device locale ${locale} → interface ${htmlLang}`);
 
-    // First run: the intro, three steps.
+    // First run: the intro, four steps.
     await page.locator('.intro').waitFor();
     await snap('intro');
     await scan('intro');
     for (let k = 0; k < 3; k++) await page.locator('.intro .primary').click();
-    check(await page.locator('.intro').count() === 0, `${lang}: intro goes through 3 steps and closes`);
+    // Step 4: how to put the app on the home screen (shown in a browser, not when installed).
+    await page.locator('.intro .install').first().waitFor();
+    check((await page.locator('.intro .step').innerText()).includes('4 / 4'), `${lang}: intro has a 4th step with the install instructions`);
+    await snap('intro-install');
+    await scan('intro install');
+    await page.locator('.intro .primary').click();
+    check(await page.locator('.intro').count() === 0, `${lang}: intro goes through 4 steps and closes`);
     await snap('start');
     await scan('start');
 
