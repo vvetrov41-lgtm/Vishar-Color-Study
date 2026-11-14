@@ -75,6 +75,41 @@ try {
     await snap('color-card');
     await scan('color card');
 
+    // Full screen over the photo: the stage covers the window, zoom keeps a tap on the same pixel.
+    {
+      const at = { u: 0.5, v: 0.42 };
+      await page.locator('.fsbtn').click();
+      await page.waitForTimeout(500);
+      const fb = await page.locator('.stage').boundingBox();
+      check(fb.width >= 439 && fb.height >= 955, `${lang}: full screen covers the window (${Math.round(fb.width)}×${Math.round(fb.height)})`);
+      const c = await page.locator('.stage canvas').first().boundingBox();
+      const target = { x: c.x + c.width * at.u, y: c.y + c.height * at.v };
+      for (let k = 0; k < 2; k++) await page.locator('.fsbar button[aria-label]').nth(1).click();
+      await page.mouse.move(target.x, target.y);
+      await page.mouse.wheel(0, -300);
+      await page.waitForTimeout(300);
+      const z = await page.evaluate(() => window.__engineDev.report().viewer.zoom);
+      await snap('fullscreen-zoom');
+      await scan('full screen');
+      // The image point that was under target is now at: zoom maps p → p·s + t (stage px).
+      const sb = await page.locator('.stage').boundingBox();
+      const zx = sb.x + (target.x - sb.x) * z.s + z.x, zy = sb.y + (target.y - sb.y) * z.s + z.y;
+      await page.mouse.click(zx, zy);
+      await page.waitForTimeout(500);
+      const zoomed = await page.evaluate(() => window.__engineDev.report().viewer.picked);
+      // Unzoomed pick at the same image point, in full screen, for the reference.
+      await page.locator('.fsbar button', { hasText: /Вписать|Fit|Ajustar/ }).click();
+      await page.mouse.click(target.x, target.y);
+      await page.waitForTimeout(500);
+      const ref = await page.evaluate(() => window.__engineDev.report().viewer.picked);
+      check(z.s > 2 && zoomed && ref && Math.abs(zoomed.x - ref.x) <= 2 && Math.abs(zoomed.y - ref.y) <= 2,
+        `${lang}: zoom ${z.s.toFixed(2)}× keeps the pipette on the same pixel (${zoomed?.x},${zoomed?.y} vs ${ref?.x},${ref?.y})`);
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(300);
+      const after = await page.evaluate(() => window.__engineDev.report().viewer);
+      check(!after.full && (await page.locator('.stage').boundingBox()).height < 600, `${lang}: Escape leaves full screen`);
+    }
+
     const tabs = page.locator('nav.tabs button');
     const nTabs = await tabs.count();
     check(nTabs === 9, `${lang}: ${nTabs} sections`);

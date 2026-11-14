@@ -27,6 +27,12 @@ export const es: Record<keyof typeof ru, string> = {
 
   'stage.empty': 'Abre una foto o un ejemplo',
   'stage.starting': 'Iniciando el motor…',
+  'stage.fullscreen': 'Pantalla completa',
+  'stage.exitFull': 'Cerrar',
+  'stage.zoomOut': 'Alejar',
+  'stage.zoomIn': 'Acercar',
+  'stage.zoomFit': 'Ajustar',
+  'stage.zoomHint': 'Dos dedos: ampliar y mover. Un toque funciona como siempre.',
   'controls.openFirst': 'Primero abre una foto: los ajustes aparecerán aquí.',
   'tabs.label': 'Secciones',
 

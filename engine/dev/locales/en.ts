@@ -27,6 +27,12 @@ export const en: Record<keyof typeof ru, string> = {
 
   'stage.empty': 'Open a photo or an example',
   'stage.starting': 'Starting the engine…',
+  'stage.fullscreen': 'Full screen',
+  'stage.exitFull': 'Close',
+  'stage.zoomOut': 'Zoom out',
+  'stage.zoomIn': 'Zoom in',
+  'stage.zoomFit': 'Fit',
+  'stage.zoomHint': 'Two fingers zoom and pan. A tap works as usual.',
   'controls.openFirst': 'Open a photo first: the settings will appear here.',
   'tabs.label': 'Sections',
 

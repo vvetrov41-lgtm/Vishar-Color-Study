@@ -27,6 +27,12 @@ export const ru = {
 
   'stage.empty': 'Открой фото или пример',
   'stage.starting': 'Запускаю движок…',
+  'stage.fullscreen': 'На весь экран',
+  'stage.exitFull': 'Закрыть',
+  'stage.zoomOut': 'Уменьшить',
+  'stage.zoomIn': 'Увеличить',
+  'stage.zoomFit': 'Вписать',
+  'stage.zoomHint': 'Два пальца: увеличить и сдвинуть. Касание работает как обычно.',
   'controls.openFirst': 'Сначала открой фото: настройки появятся здесь.',
   'tabs.label': 'Разделы',
 
